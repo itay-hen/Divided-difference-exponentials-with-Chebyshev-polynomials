@@ -1,19 +1,28 @@
 #include "test_chebyshev_bessel_Rn.hpp"
 #include "test_chebyshev_bessel_I0.hpp"
-#include "test_comparison.hpp"
-#include "test_comparison_ratios.hpp"
+#include "test_comparison_chebyshev_mccurdy.hpp"
+#include "test_comparison_ratios_chebyshev_mccurdy.hpp"
 #include "chebyshev_convergence_stats.hpp"
 #include "comparison_test.hpp"
 #include <iostream>
 
 int main() {
     
-   //return test_bessel_ratios::run_all_tests();
+    //return test_chebyshev_bessel_I0::run_all_tests("bessel_I0_results.csv");
+
     
-    //test_chebyshev_bessel_I0::run_all_tests("/mnt/user-data/outputs/I0_test_results.csv");
+    //return test_bessel_ratios::run_all_tests();
     
-    //test_comparison::test_single_case(5., 30);
-    //test_comparison_ratios::test_ratio_case(1.0, 5, 50);
+    
+    //test_comparison::test_single_case(10., 50);
+    //test_comparison_ratios::test_ratio_case(100.0, 50, 50);
+    /*
+    std::vector<double> b_values = {0.1, 0.2,0.5,1.0, 10.0, 20., 50.,100.0,150.,200.};
+    std::vector<int> q_values = {1, 5,10, 20, 30,40,50,60,70,80,90,100};
+    test_comparison_ratios::generate_ratio_heatmap(
+        b_values, q_values, 100, "output.csv"
+    );
+     */
     
     // Quick test (fewer combinations for fast testing)
     //test_comparison::run_all_tests("quick_comparison", test_comparison::TestConfig::create_quick());
@@ -24,8 +33,8 @@ int main() {
     // Comprehensive test (extensive coverage - takes longer)
     // test_comparison::run_all_tests("comprehensive_comparison", test_comparison::TestConfig::create_comprehensive());
    /*
-    std::vector<double> b_values = {0.5, 1.0, 5.0, 10.0, 20.0};
-       std::vector<int> q_values = {5, 10, 15, 20, 25, 30};
+    std::vector<double> b_values = {0.1,0.2,0.5, 1.0, 1.5,2., 3.0,5.0, 10.0, 15.,20.0, 30.,40.,50.,60.,70.,80.,90.,100.,110.,120.,130.,140.,150.,160.,170.,180.,190.,200.};
+       std::vector<int> q_values = {1,2,5, 10, 15, 20, 25, 30,35,40,45,50,60,70,80,90,100};
        
        chebyshev_stats::exportQuartilesToFile(
            "quartiles.csv",
@@ -34,6 +43,7 @@ int main() {
            q_values
        );
     */
+    
     
     comparison_test::ComparisonConfig custom_config;
         custom_config.a = -2.0;

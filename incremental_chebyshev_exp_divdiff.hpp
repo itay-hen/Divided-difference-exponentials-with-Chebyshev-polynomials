@@ -416,7 +416,7 @@ private:
                 if (n >= static_cast<size_t>(q + 5)) {
                     bool all_small = true;
                     for (int i = 0; i < 5; ++i) {
-                        if (last_5_terms[i] >= tolerance_ * traits::max(traits::abs(S), traits::one())) {
+                        if (last_5_terms[i] >= tolerance_ * traits::abs(S)) {
                             all_small = false;
                             break;
                         }
@@ -554,7 +554,7 @@ public:
                 if (n >= current_q_ + 5) {
                     bool all_small = true;
                     for (int i = 0; i < 5; ++i) {
-                        if (last_5_terms[i] >= tolerance_ * traits::max(traits::abs(S), traits::one())) {
+                        if (last_5_terms[i] >= tolerance_ * traits::abs(S)) {
                             all_small = false;
                             break;
                         }
@@ -686,7 +686,7 @@ public:
                 if (n >= current_q_ + 5) {
                     bool all_small = true;
                     for (int i = 0; i < 5; ++i) {
-                        if (last_5_terms[i] >= tolerance_ * traits::max(traits::abs(S), traits::one())) {
+                        if (last_5_terms[i] >= tolerance_ * traits::abs(S)) {
                             all_small = false;
                             break;
                         }

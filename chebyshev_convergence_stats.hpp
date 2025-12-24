@@ -66,8 +66,7 @@ inline int medianNterms(double b, int q, int n_trials = 100,
             nodes[i] = dist(rng);
         }
         
-        // Sort nodes (optional, but often done in practice)
-        std::sort(nodes.begin(), nodes.end());
+     
         
         // Evaluate and capture number of terms
         int n_terms = 0;
@@ -152,7 +151,7 @@ inline ConvergenceStats getConvergenceStats(double b, int q, int n_trials = 100,
         for (int i = 0; i <= q; ++i) {
             nodes[i] = dist(rng);
         }
-        std::sort(nodes.begin(), nodes.end());
+        
         
         int n_terms = 0;
         try {
@@ -471,7 +470,6 @@ inline void exportQuartilesToFile(const std::string& filename,
                     for (int i = 0; i <= q; ++i) {
                         nodes[i] = dist(rng);
                     }
-                    std::sort(nodes.begin(), nodes.end());
                     
                     // Evaluate and capture number of terms
                     int n_terms = 0;

@@ -468,7 +468,7 @@ public:
                 if (n >= q + 5) {
                     bool all_small = true;
                     for (int i = 0; i < 5; ++i) {
-                        if (last_5_terms[i] >= tolerance_ * std::max(traits::abs(S), traits::one())) {
+                        if (last_5_terms[i] >= tolerance_ * traits::abs(S)) {
                             all_small = false;
                             break;
                         }
