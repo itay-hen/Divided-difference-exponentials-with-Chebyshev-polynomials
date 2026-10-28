@@ -1,378 +1,107 @@
-# Divided-difference-exponentials-with-Chebyshev-polynomials
+# Exponential divided differences via Chebyshev polynomials
 
+Reference C++17 implementation accompanying the paper
+*Exponential divided differences via Chebyshev polynomials* (I. Hen).
 
-# Chebyshev Exponential Divided Differences
+It computes exp[x₀, …, x_q] by expanding e^{cy} = I₀(c)(1 + 2 Σ Rₙ(c) Tₙ(y))
+on the mapped interval and obtaining the Chebyshev divided differences
+Tₙ[y₀, …, y_k] from a three-term recurrence. Header-only; no dependencies
+beyond the C++17 standard library (Boost.Math is used for `cyl_bessel_i` on
+platforms whose standard library lacks it, e.g. Apple libc++).
 
-A high-performance C++ library for computing exponential divided differences using Chebyshev polynomial expansions. This method provides superior numerical stability and efficiency compared to classical approaches, especially for high-order divided differences and large intervals.
+## What it is good for — and what not
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
+* **Incremental updates.** With a fixed interval, appending a node costs
+  Θ(N_max − q) and removing the most recently appended node costs O(1)
+  (`chebyshev_stack.hpp`). In our measurements an append takes 0.15–0.35 µs,
+  up to ~10³× less than a full recomputation (q = 800). This is the update
+  pattern of permutation-matrix-representation quantum Monte Carlo.
+* **Accuracy.** Near working precision when q ≫ c, when q ≲ 10, or when
+  c ≲ 30 (c = half-width of the interval), including clustered, repeated and
+  nearly coincident nodes. The series is **ill-conditioned** when q and c are
+  both large with q ≲ c, and when the nodes lie far below the upper end b of
+  the interval. The code computes an error indicator κ·u·N and **raises an
+  exception instead of returning an inaccurate value**; use MNP
+  (`mccurdy.hpp`) or higher precision there.
+* **Range.** All intermediate quantities are scaled; any order works (tested
+  to q = 3000). Values outside double range are returned in mantissa/exponent
+  form; ratios of same-order values on the same interval are formed directly.
+* **Truncation length.** N ≥ q exactly; N ≈ √(2c ln(1/ε)) when the width
+  dominates.
 
-## Overview
-
-This library implements the Chebyshev polynomial method for computing exponential divided differences:
-
-```
-f[x₀, x₁, ..., xₙ] where f(x) = exp(x)
-```
-
-**Key Features:**
-- ✅ **Superior stability:** No catastrophic cancellation at high orders (q > 50)
-- ✅ **Efficient convergence:** Approximately q+10 terms for small intervals
-- ✅ **Batch and incremental modes:** Choose based on your use case
-- ✅ **Arbitrary precision ready:** Template-based design supports double, long double, and custom types
-- ✅ **Validated accuracy:** Comprehensive test suite with reference comparisons
-
-## Quick Start
-
-### Basic Usage
-
-```cpp
-#include "chebyshev_exp_divdiff.hpp"
-#include <vector>
-
-int main() {
-    // Define interval
-    double a = -1.0, b = 1.0;
-    
-    // Create solver
-    chebyshev::ExpDivDiff<double> solver(a, b);
-    
-    // Define nodes
-    std::vector<double> nodes = {-0.5, 0.0, 0.3, 0.7};
-    
-    // Compute divided difference
-    double result = solver.evaluate(nodes);
-    
-    // Get number of iterations used
-    int n_terms;
-    result = solver.evaluate(nodes, &n_terms);
-    
-    return 0;
-}
-```
-
-### Incremental Updates
-
-For applications requiring dynamic node addition:
+## Quick start
 
 ```cpp
-#include "incremental_chebyshev_exp_divdiff.hpp"
+#include "chebyshev_exp_divdiff.hpp"   // batch evaluation
+#include "chebyshev_stack.hpp"         // incremental evaluation
 
-chebyshev_incremental::IncrementalExpDivDiff<double> solver(a, b);
+// Batch: one divided difference.
+chebyshev::ExpDivDiff<double> e(-1.0, 1.0);          // interval [a, b]
+double v = e.evaluate({-0.5, 0.0, 0.3, 0.7});
+auto s   = e.evaluate_scaled(nodes);                 // mantissa * 2^exponent
+double r = e.evaluate_ratio(nodes1, nodes2);         // same order, same interval
+long double est = e.last_error_estimate();           // kappa * u * N
 
-// Initialize with first q+1 nodes
-std::vector<double> initial_nodes = {x0, x1, x2, x3};
-double result = solver.initialize(initial_nodes);
-
-// Add nodes incrementally
-result = solver.add_node(x4);
-result = solver.add_node(x5);
+// Incremental: append / LIFO remove on a fixed interval.
+chebyshev::IncrementalStack<double> st(a, b, /*q_max=*/1000);
+st.initialize(initial_nodes);       // inserted in nonincreasing order
+st.push(x);                         // Theta(N_max - q); throws if ill-conditioned
+auto val = st.value_scaled();       // exp[x_0..x_q] as mantissa/exponent
+st.pop();                           // O(1)
 ```
 
-## Performance
+Choose b close to the largest node (for a single evaluation, b = max xᵢ;
+`evaluate()` retries on [min xᵢ, max xᵢ] automatically). Lowering a only
+costs extra terms; raising b above the nodes costs accuracy ~ e^{b − max xᵢ}.
 
-### Convergence Scaling
+## Files
 
-For purely relative convergence criterion (|term| < ε|S|):
+| File | Contents |
+|---|---|
+| `chebyshev_bessel.hpp` | Bessel ratios (backward ratio recurrence), I₀, portable `cyl_bessel_i` |
+| `chebyshev_exp_divdiff.hpp` | Batch evaluator (Algorithm 1): scaling, error indicator, re-anchoring, nonincreasing processing order |
+| `chebyshev_stack.hpp` | Incremental evaluator (weighted contiguous columns, per-prefix gating) |
+| `mccurdy.hpp` | McCurdy–Ng–Parlett baseline (entry-wise Taylor convergence, divided-difference squaring) |
+| `incremental_chebyshev_exp_divdiff.hpp` | Legacy incremental class, superseded by `chebyshev_stack.hpp`; kept for older tests |
+| `main.cpp` + `test_*.hpp` | Test driver: 8 required groups + 1 informational (mpmath) group |
+| `mpmath_reference.py`, `cases.csv`, `reference.csv` | High-precision reference values for the informational group |
+| `experiments/` | Drivers and plotting scripts for every figure and table of the paper |
+| `CODE_CHANGES.md` | Detailed change log |
 
-| Interval b | Order q | Terms Required | Scaling |
-|-----------|---------|----------------|---------|
-| 0.1 | 100 | 110 | **q + 10** |
-| 1.0 | 50 | 63 | q + 13 |
-| 10.0 | 30 | 54 | q + 24 |
+## Build and test
 
-**Empirical scaling laws:**
-- Small intervals (b ≤ 1): N_terms ∝ q^0.5 (√q scaling)
-- Large intervals (b > 10): N_terms ∝ b^0.1 q^0.3
-
-### Comparison with McCurdy Method
-
-| Parameter | McCurdy | Chebyshev | Winner |
-|-----------|---------|-----------|--------|
-| q=50, b=1 | ✓ Works | ✓ Works | Tie |
-| q=70, b=10 | ✗ Fails | ✓ Works | **Chebyshev** |
-| q=100, b=100 | ✗ Fails | ✓ Works | **Chebyshev** |
-
-**Success rate at high orders (q ≥ 70):**
-- McCurdy: 0% (complete failure)
-- Chebyshev: **100%** (zero failures)
-
-## Mathematical Background
-
-The method expands the exponential function in Chebyshev polynomials on [-b, b]:
-
-```
-exp(x) = exp(d) I₀(c) Σ 2Rₙ(c) Tₙ(y)
+```sh
+g++ -std=c++17 -O2 -I. -I/opt/homebrew/include main.cpp -o ci_runner   # -I for Boost on macOS
+./ci_runner          # exits non-zero if a required group fails
 ```
 
-where:
-- c = (b - a)/2 (interval half-width)
-- d = (b + a)/2 (interval center)  
-- y = (x - d)/c (mapped coordinate)
-- Rₙ(c) = Iₙ(c)/I₀(c) (modified Bessel function ratios)
-- Tₙ(y) (Chebyshev polynomial of the first kind)
+Sanitizers: add `-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer`.
 
-Divided differences are then computed using the three-term recurrence:
-
-```
-Dₙ[k] = 2y[k]Dₙ₋₁[k] + 2Dₙ₋₁[k-1] - Dₙ₋₂[k]
-```
-
-**Key insight:** The first q terms (n < q) are identically zero, so only ~10 additional terms are needed for convergence at small intervals.
-
-## API Reference
-
-### Core Classes
-
-#### `chebyshev::ExpDivDiff<Real>`
-
-Batch evaluation of exponential divided differences.
-
-**Methods:**
-```cpp
-// Construct solver for interval [a, b]
-ExpDivDiff(Real a, Real b, Real tolerance = 1e-14, int max_iterations = 10000);
-
-// Evaluate f[x[0], ..., x[q]]
-Real evaluate(const std::vector<Real>& nodes, int* n_out = nullptr);
-
-// Evaluate normalized form (avoids overflow)
-Real evaluate_normalized(const std::vector<Real>& nodes, int* n_out = nullptr);
-```
-
-#### `chebyshev_incremental::IncrementalExpDivDiff<Real>`
-
-Incremental evaluation with caching for dynamic node addition.
-
-**Methods:**
-```cpp
-// Initialize with q+1 nodes
-Real initialize(const std::vector<Real>& nodes);
-
-// Add a single node
-Real add_node(Real x_new);
-
-// Get current result
-Real get_value() const;
-Real get_normalized_value() const;
-```
-
-### Convergence Statistics
-
-The `chebyshev_convergence_stats` namespace provides tools for analyzing convergence behavior:
-
-```cpp
-// Get median number of terms for (b, q)
-int median = chebyshev_stats::medianNterms(b, q, n_trials);
-
-// Get full statistics
-auto stats = chebyshev_stats::getConvergenceStats(b, q, n_trials);
-
-// Export quartiles to CSV for plotting
-chebyshev_stats::exportQuartilesToFile(
-    "quartiles.csv", 
-    n_trials, 
-    b_values, 
-    q_values
-);
-```
-
-## Test Suite
-
-Comprehensive validation against reference implementations:
-
-### Running Tests
-
-```bash
-# Compile
-g++ -std=c++17 -O2 -o test_suite main.cpp
-
-# Run all tests
-./test_suite
-```
-
-### Available Tests
-
-**1. Bessel Ratio Validation** (`test_chebyshev_bessel_Rn.hpp`)
-- Validates Rₙ(c) = Iₙ(c)/I₀(c) against scipy.special.iv
-- Coverage: c ∈ [0.1, 100], n ∈ [0, 200]
-- Expected: Machine precision (relative error < 10⁻⁶)
-
-**2. Bessel I₀ Validation** (`test_chebyshev_bessel_I0.hpp`)
-- Validates I₀(c) computation
-- Reference: scipy.special.i0
-
-**3. McCurdy Comparison** (`test_comparison_chebyshev_mccurdy.hpp`)
-- Head-to-head accuracy comparison
-- Tests across parameter space
-
-**4. Ratio Comparison** (`test_comparison_ratios_chebyshev_mccurdy.hpp`)
-- Compares ratio computations (numerator/denominator)
-- Generates heatmaps of relative differences
-
-**5. Batch vs Incremental** (`comparison_test.hpp`)
-- Validates incremental implementation
-- Ensures identical results
-
-## File Structure
-
-```
-.
-├── chebyshev_exp_divdiff.hpp               # Core batch implementation
-├── incremental_chebyshev_exp_divdiff.hpp   # Incremental implementation
-├── chebyshev_convergence_stats.hpp         # Convergence analysis tools
-├── mccurdy.hpp                             # McCurdy reference implementation
-├── test_chebyshev_bessel_Rn.hpp           # Bessel ratio tests
-├── test_chebyshev_bessel_I0.hpp           # Bessel I0 tests
-├── test_comparison_chebyshev_mccurdy.hpp  # Accuracy comparison tests
-├── test_comparison_ratios_chebyshev_mccurdy.hpp  # Ratio comparison tests
-├── comparison_test.hpp                     # Batch vs incremental tests
-├── main.cpp                                # Example usage and test runner
-└── README.md                               # This file
-```
-
-## Implementation Details
-
-### Convergence Criterion
-
-The library uses a **purely relative** convergence criterion:
-
-```cpp
-|term| < tolerance * |S|
-```
-
-where S is the accumulated sum. This ensures consistent relative accuracy across all result magnitudes (10⁻³⁰⁰ to 10³⁰⁰).
-
-**Default tolerance:** 10⁻¹⁴
-
-### Numerical Stability Features
-
-1. **Normalized evaluation:** Avoids overflow for large intervals
-2. **Miller's algorithm:** Backward recurrence for Bessel ratios
-3. **Continued fractions:** Robust computation at small arguments
-4. **Automatic Nstart selection:** Ensures Bessel ratio accuracy
-
-## Advanced Usage
-
-### Custom Precision Types
-
-```cpp
-#include <boost/multiprecision/cpp_dec_float.hpp>
-
-using Real = boost::multiprecision::cpp_dec_float_50;
-chebyshev::ExpDivDiff<Real> solver(a, b);
-```
-
-### Convergence Analysis
-
-```cpp
-// Analyze how convergence scales with order
-chebyshev_stats::analyzeScalingWithQ(b, n_trials);
-
-// Analyze how convergence scales with interval size
-chebyshev_stats::analyzeScalingWithB(q, n_trials);
-
-// Generate convergence heatmap
-chebyshev_stats::printConvergenceHeatmap(n_trials);
-```
-
-### Customizing Tolerance
-
-```cpp
-// Tighter tolerance for high precision
-chebyshev::ExpDivDiff<double> solver(a, b, 1e-16);
-
-// Looser tolerance for performance
-chebyshev::ExpDivDiff<double> solver(a, b, 1e-10);
-```
-
-## Applications
-
-This library is particularly useful for:
-
-- **Quantum Monte Carlo:** Computing out-of-time-order correlators (OTOCs)
-- **Statistical mechanics:** Matsubara susceptibilities
-- **Quantum information:** Rényi entanglement entropy
-- **Numerical analysis:** High-order Taylor coefficients
-- **Approximation theory:** Polynomial interpolation
-
-## Performance Tips
-
-1. **Use normalized evaluation** for large b to avoid overflow
-2. **Sort nodes** only if required by application (unsorted is more stable)
-3. **Batch evaluation** is faster than incremental for static node sets
-4. **Incremental evaluation** shines when adding nodes one at a time
-
-## Benchmarks
-
-On a modern CPU (Intel i7, 3.5 GHz):
-
-| Configuration | Time per Evaluation | Throughput |
-|---------------|-------------------|------------|
-| b=1, q=10 | 2 μs | 500k/sec |
-| b=10, q=50 | 15 μs | 66k/sec |
-| b=100, q=100 | 45 μs | 22k/sec |
+Experiments (Python 3 with numpy, matplotlib, mpmath):
+`experiments/accuracy/run_all.sh`, `experiments/performance/build_and_run.sh`,
+and `experiments/scaling/n_kappa_sweep.cpp` + `plot_scaling.py`. The shell
+drivers write CSV data to `$DATA` and figures to `$FIGS`; set both, e.g.
+`DATA=out FIGS=out experiments/accuracy/run_all.sh` (the defaults point to the
+author's paper folders).
 
 ## Citation
 
-If you use this library in academic work, please cite:
-
 ```bibtex
-@software{chebyshev_exp_divdiff,
-  title = {Chebyshev Exponential Divided Differences},
-  author = {Itay Hen},
-  year = {2024},
-  url = {https://github.com/[your-username]/chebyshev-exp-divdiff}
+@misc{Hen2025DividedDifferenceChebyshev,
+  author       = {Hen, Itay},
+  title        = {Divided-difference exponentials with {C}hebyshev polynomials},
+  howpublished = {GitHub repository},
+  url          = {https://github.com/itay-hen/Divided-difference-exponentials-with-Chebyshev-polynomials},
+  year         = {2025}
 }
 ```
 
-## References
-
-1. **McCurdy, Ng, Parlett** (1984): "Accurate Computation of Divided Differences of the Exponential Function"  
-   *Mathematics of Computation*, Vol. 43, No. 168, pp. 501-528
-
-2. **Trefethen** (2013): *Approximation Theory and Approximation Practice*  
-   SIAM, Chapter on Chebyshev polynomials
-
-3. **Abramowitz & Stegun** (1964): *Handbook of Mathematical Functions*  
-   Chapter 9: Bessel Functions
-
 ## License
 
-MIT License - See LICENSE file for details
-
-## Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
+MIT License.
 
 ## Author
 
-Itay Hen
-itayhen@isi.edu
-University of Southern California
+Itay Hen — Information Sciences Institute, University of Southern California — itayhen@isi.edu
 
-## Acknowledgments
-
-- Claude (Anthropic) for development assistance
-- scipy contributors for reference Bessel implementations
-
-
-## Version History
-
-**v1.0.0** (2024-12-24)
-- Initial release
-- Batch and incremental implementations
-- Comprehensive test suite
-- Purely relative convergence criterion
-- Full documentation
-
----
-
-**Questions?** Open an issue on GitHub or contact [your email]
+AI-based tools assisted with programming; all code was reviewed and tested by the author.

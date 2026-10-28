@@ -81,118 +81,109 @@ struct RatioTrialResult {
 };
 
 /**
- * @brief Run a single ratio trial
+ * @brief Run a single ratio trial at working precision Real.
+ *
+ * Both Chebyshev (full and normalized) and MNP are evaluated at the
+ * same `Real` precision (default `double`).  The earlier long-double
+ * MNP "reference" is dropped — it was a precision-asymmetric
+ * comparison that credited MNP when comparing against itself in
+ * higher precision.  For a true accuracy check use
+ * test_against_reference.hpp.
  */
+template<typename Real = double>
 inline RatioTrialResult run_ratio_trial(double b, int q, int trial, std::mt19937& rng) {
     RatioTrialResult result;
     result.b = b;
     result.q = q;
     result.trial = trial;
-    
-    // Generate two different sets of random nodes in [-b, b]
+
+    // Generate two different sets of random nodes in [-b, b].
     std::uniform_real_distribution<double> dist(-b, b);
-    
-    std::vector<double> nodes_num(q + 1);
-    std::vector<double> nodes_den(q + 1);
-    
+    std::vector<Real> nodes_num(q + 1);
+    std::vector<Real> nodes_den(q + 1);
     for (int i = 0; i <= q; ++i) {
-        nodes_num[i] = dist(rng);
-        nodes_den[i] = dist(rng);
+        nodes_num[i] = static_cast<Real>(dist(rng));
+        nodes_den[i] = static_cast<Real>(dist(rng));
     }
-    
-    
-    // === Compute reference (long double McCurdy) ===
-    try {
-        std::vector<long double> nodes_num_ld(nodes_num.begin(), nodes_num.end());
-        std::vector<long double> nodes_den_ld(nodes_den.begin(), nodes_den.end());
-        
-        long double num_ref = mccurdy_templated::ExpDivDiff<long double>::compute(nodes_num_ld);
-        long double den_ref = mccurdy_templated::ExpDivDiff<long double>::compute(nodes_den_ld);
-        
-        if (std::abs(den_ref) > 1e-100) {
-            result.reference_ratio = static_cast<double>(num_ref / den_ref);
-        }
-    } catch (...) {
-        // Reference computation failed - mark as invalid
-        return result;
-    }
-    
-    // === McCurdy (double) ===
+    const Real b_R = static_cast<Real>(b);
+
+    // === McCurdy at working precision Real ===
+    Real mc_num = std::numeric_limits<Real>::quiet_NaN();
+    Real mc_den = std::numeric_limits<Real>::quiet_NaN();
     try {
         auto start = std::chrono::high_resolution_clock::now();
-        
-        result.mccurdy_num = mccurdy_templated::ExpDivDiff<double>::compute(nodes_num);
-        result.mccurdy_den = mccurdy_templated::ExpDivDiff<double>::compute(nodes_den);
-        
+        mc_num = mccurdy_templated::ExpDivDiff<Real>::compute(nodes_num);
+        mc_den = mccurdy_templated::ExpDivDiff<Real>::compute(nodes_den);
         auto end = std::chrono::high_resolution_clock::now();
-        result.mccurdy_time_us = std::chrono::duration<double, std::micro>(end - start).count();
-        
+        result.mccurdy_num = static_cast<double>(mc_num);
+        result.mccurdy_den = static_cast<double>(mc_den);
+        result.mccurdy_time_us =
+            std::chrono::duration<double, std::micro>(end - start).count();
         if (std::abs(result.mccurdy_den) > 1e-100) {
             result.mccurdy_ratio = result.mccurdy_num / result.mccurdy_den;
             result.mccurdy_valid = true;
-            
-            if (std::abs(result.reference_ratio) > 1e-100) {
-                result.mccurdy_error = std::abs((result.mccurdy_ratio - result.reference_ratio)
-                                                / result.reference_ratio);
-            }
         }
     } catch (...) {
         result.mccurdy_valid = false;
     }
-    
-    // === Chebyshev (full evaluation) ===
+
+    // Use the same-precision MNP ratio as the baseline column; mccurdy_error
+    // is 0 by construction (kept for CSV compat).  The meaningful columns
+    // below (cheby_full_error and cheby_normalized_error) are the
+    // pairwise rel diff between Chebyshev and MNP at matched precision.
+    result.reference_ratio = result.mccurdy_ratio;
+    result.mccurdy_error   = 0.0;
+
+    // === Chebyshev (full evaluation) at working precision Real ===
     try {
-        chebyshev::ExpDivDiff<double> solver(-b, b);
-        
+        chebyshev::ExpDivDiff<Real> solver(-b_R, b_R);
         auto start = std::chrono::high_resolution_clock::now();
-        
         int n_terms_num = 0, n_terms_den = 0;
-        result.cheby_full_num = solver.evaluate(nodes_num, &n_terms_num);
-        result.cheby_full_den = solver.evaluate(nodes_den, &n_terms_den);
-        
+        Real cn = solver.evaluate(nodes_num, &n_terms_num);
+        Real cd = solver.evaluate(nodes_den, &n_terms_den);
         auto end = std::chrono::high_resolution_clock::now();
-        result.cheby_full_time_us = std::chrono::duration<double, std::micro>(end - start).count();
-        
+        result.cheby_full_num = static_cast<double>(cn);
+        result.cheby_full_den = static_cast<double>(cd);
+        result.cheby_full_time_us =
+            std::chrono::duration<double, std::micro>(end - start).count();
         result.cheby_n_terms_num = n_terms_num;
         result.cheby_n_terms_den = n_terms_den;
-        
         if (std::abs(result.cheby_full_den) > 1e-100) {
             result.cheby_full_ratio = result.cheby_full_num / result.cheby_full_den;
             result.cheby_full_valid = true;
-            
             if (std::abs(result.reference_ratio) > 1e-100) {
-                result.cheby_full_error = std::abs((result.cheby_full_ratio - result.reference_ratio)
-                                                   / result.reference_ratio);
+                result.cheby_full_error =
+                    std::abs((result.cheby_full_ratio - result.reference_ratio)
+                             / result.reference_ratio);
             }
         }
     } catch (...) {
         result.cheby_full_valid = false;
     }
-    
-    // === Chebyshev (normalized evaluation) ===
-    // KEY: Scaling factors cancel in the ratio!
+
+    // === Chebyshev (normalized evaluation) at working precision Real ===
+    // Scaling factors cancel in the ratio.
     try {
-        chebyshev::ExpDivDiff<double> solver(-b, b);
-        
+        chebyshev::ExpDivDiff<Real> solver(-b_R, b_R);
         auto start = std::chrono::high_resolution_clock::now();
-        
         int n_terms_num = 0, n_terms_den = 0;
-        result.cheby_norm_num = solver.evaluate_normalized(nodes_num, &n_terms_num);
-        result.cheby_norm_den = solver.evaluate_normalized(nodes_den, &n_terms_den);
-        
+        Real nn = solver.evaluate_normalized(nodes_num, &n_terms_num);
+        Real nd = solver.evaluate_normalized(nodes_den, &n_terms_den);
         auto end = std::chrono::high_resolution_clock::now();
-        result.cheby_normalized_time_us = std::chrono::duration<double, std::micro>(end - start).count();
-        
-        if (std::abs(result.cheby_norm_den) > 0 && std::isfinite(result.cheby_norm_den)) {
-            result.cheby_normalized_ratio = result.cheby_norm_num / result.cheby_norm_den;
-            
-            // Check if ratio is valid (finite and not NaN)
+        result.cheby_norm_num = static_cast<double>(nn);
+        result.cheby_norm_den = static_cast<double>(nd);
+        result.cheby_normalized_time_us =
+            std::chrono::duration<double, std::micro>(end - start).count();
+        if (std::abs(result.cheby_norm_den) > 0 &&
+            std::isfinite(result.cheby_norm_den)) {
+            result.cheby_normalized_ratio =
+                result.cheby_norm_num / result.cheby_norm_den;
             if (std::isfinite(result.cheby_normalized_ratio)) {
                 result.cheby_normalized_valid = true;
-                
                 if (std::abs(result.reference_ratio) > 1e-100) {
-                    result.cheby_normalized_error = std::abs((result.cheby_normalized_ratio - result.reference_ratio)
-                                                            / result.reference_ratio);
+                    result.cheby_normalized_error =
+                        std::abs((result.cheby_normalized_ratio - result.reference_ratio)
+                                 / result.reference_ratio);
                 }
             }
         }
@@ -206,6 +197,7 @@ inline RatioTrialResult run_ratio_trial(double b, int q, int trial, std::mt19937
 /**
  * @brief Test ratios of divided differences
  */
+template<typename Real = double>
 inline void test_ratio_case(double b, int q, int n_trials = 50,
                            unsigned int random_seed = 12345,
                            std::ostream& os = std::cout) {
@@ -231,7 +223,7 @@ inline void test_ratio_case(double b, int q, int n_trials = 50,
     
     os << "Running trials...\n";
     for (int trial = 0; trial < n_trials; ++trial) {
-        RatioTrialResult result = run_ratio_trial(b, q, trial, rng);
+        RatioTrialResult result = run_ratio_trial<Real>(b, q, trial, rng);
         results.push_back(result);
         
         if ((trial + 1) % 10 == 0 || trial == 0) {
@@ -398,6 +390,7 @@ inline void test_ratio_case(double b, int q, int n_trials = 50,
  * @param random_seed Random seed for reproducibility (default: 12345)
  * @param os Output stream for progress (default: std::cout)
  */
+template<typename Real = double>
 inline void generate_ratio_heatmap(
     const std::vector<double>& b_values,
     const std::vector<int>& q_values,
@@ -453,7 +446,7 @@ inline void generate_ratio_heatmap(
             
             // Run n_trials for this (b, q)
             for (int trial = 0; trial < n_trials; ++trial) {
-                RatioTrialResult result = run_ratio_trial(b, q, trial, rng);
+                RatioTrialResult result = run_ratio_trial<Real>(b, q, trial, rng);
                 
                 // Check if both methods succeeded
                 if (result.mccurdy_valid && result.cheby_normalized_valid) {
