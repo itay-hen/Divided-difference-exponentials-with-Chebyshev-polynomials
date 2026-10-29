@@ -507,76 +507,81 @@ inline Real bessel_ratio(int n, Real c, Real /*I0_c_ignored*/ = Real(-1)) {
     return R[n];
 }
 
+namespace detail {
+/**
+ * @brief Large-argument asymptotic series of I_0, summed to convergence:
+ *     I_0(c) ~ e^c / sqrt(2 pi c) * sum_k a_k / c^k,
+ *     a_0 = 1,  a_k = a_{k-1} (2k-1)^2 / (8k)      (DLMF 10.40.1, nu = 0),
+ * i.e. 1 + 1/(8c) + 9/(128 c^2) + 225/(3072 c^3) + 11025/(98304 c^4) + ...
+ * All terms are positive for real c > 0.  Terms are added (in long
+ * double) until they fall below 1e-30 relative, which for the c >~ 700
+ * where this is used takes a handful of terms; *rem_out receives the
+ * first omitted term as a relative remainder estimate.
+ *
+ * Revision note: the earlier four-term version used the coefficient
+ * 75/3072 instead of 225/3072 for the c^-3 term (relative error
+ * ~1.4e-10 at c = 700), which propagated silently into every
+ * divided difference evaluated through the large-c prefactor.
+ */
+inline long double log_I0_asymptotic(long double c, long double* rem_out) {
+    long double sum = 1.0L, term = 1.0L;
+    for (int k = 1; k < 200; ++k) {
+        const long double next = term * (2.0L * k - 1.0L) * (2.0L * k - 1.0L)
+                                 / (8.0L * k * c);
+        if (next >= term) break;            // series starts to diverge
+        term = next;
+        if (term < 1e-30L * sum) { break; }
+        sum += term;
+    }
+    if (rem_out) *rem_out = term;
+    const long double two_pi = 6.283185307179586476925286766559005768L;
+    return c - 0.5L * std::log(two_pi * c) + std::log(sum);
+}
+} // namespace detail
+
 /**
  * @brief Accurate log(I_0(c)).
  *
- * For c small enough that I_0(c) fits in Real, use std::log of the
- * direct value.  For larger c, use a four-term truncation of the
- * standard asymptotic series
- *     I_0(c) ~ e^c / sqrt(2 pi c) * (1 + 1/(8c) + 9/(128 c^2)
- *                                       + 75/(1024 c^3) + ...).
- * The truncation error is bounded by the next omitted term
- * ~ 3675/(98304 c^4); for c >= ~5 this is well below 1e-11, dropping
- * as 1/c^4.  Suitable for forming actual normalized-value
- * expressions like
- *     log S = c y_0 + q log c - log(q!) - log I_0(c).
+ * For c small enough that I_0(c) fits in Real, std::log of the direct
+ * value; otherwise the full large-argument asymptotic series
+ * (detail::log_I0_asymptotic), whose truncation error is far below
+ * working precision for c >~ 700.
  *
  * Use log_I0_upper() instead when the value will feed into a
- * one-sided certificate bound; that variant pads the truncation
- * error upward so the bound stays valid.
+ * one-sided certificate bound.
  */
 template<typename Real>
 inline Real log_I0_value(const Real& c) {
     using std::log;
-    // Threshold below which I_0(c) is guaranteed not to overflow in
-    // Real.  I_0(c) <= e^c, so the safe limit is log(max(Real)) with
-    // a small margin for the std::log evaluation.
+    // I_0(c) <= e^c, so below log(max(Real)) - 10 the direct value fits.
     const Real safe_c = log(std::numeric_limits<Real>::max()) - Real(10);
     if (c < safe_c) {
         return log(bessel_I0(c));
     }
-    const Real two_pi = Real(2) * Real(3.14159265358979323846264338327950288L);
-    const Real inv8c  = Real(1) / (Real(8) * c);
-    const Real corr   = Real(1) + inv8c
-                      + (Real(9) / Real(2)) * inv8c * inv8c
-                      + (Real(75) / Real(6)) * inv8c * inv8c * inv8c;
-    return c - Real(0.5) * log(two_pi * c) + log(corr);
+    return static_cast<Real>(detail::log_I0_asymptotic(
+        static_cast<long double>(c), nullptr));
 }
 
 /**
  * @brief Conservative floating-point upper estimate of log(I_0(c)).
  *
- * Returns log_I0_value(c) plus a small positive pad that absorbs:
- *   - rounding from std::log + cyl_bessel_i in the direct regime,
- *   - the next omitted asymptotic correction in the large-c regime.
- *
- * Used exclusively by the ConservativeTailEstimate stopping rule,
- * where a one-sided over-estimate of log(I_0(c)) keeps the
- * prefactor an upper bound on the analytic prefactor it represents.
- *
- * Caveat (deliberately weakened from earlier "rigorous" wording):
- * this is a conservative floating-point implementation, not an
- * interval-arithmetic certificate.  The pad assumes std::cyl_bessel_i
- * rounds within a few ulps (true on glibc / libstdc++) and that the
- * asymptotic remainder is dominated by the next written term (true
- * asymptotically and verified numerically against mpmath).
+ * log_I0_value(c) plus a pad covering the rounding of the evaluation
+ * (16 ulps of the result) and, in the asymptotic regime, twice the
+ * first omitted term of the series.  A conservative floating-point
+ * estimate, not an interval-arithmetic certificate.
  */
 template<typename Real>
 inline Real log_I0_upper(const Real& c) {
-    const Real value = log_I0_value(c);
     const Real safe_c = std::log(std::numeric_limits<Real>::max()) - Real(10);
+    const Real rounding_pad = [&](Real v) {
+        return Real(16) * std::numeric_limits<Real>::epsilon() * std::abs(v);
+    }(log_I0_value(c));
     if (c < safe_c) {
-        const Real pad = Real(16) * std::numeric_limits<Real>::epsilon()
-                       * std::abs(value);
-        return value + pad;
+        return log_I0_value(c) + rounding_pad;
     }
-    // Asymptotic regime: pad by an upper bound on the next omitted
-    // correction term in the series for I_0.  The next term beyond
-    // the cubic correction in log_I0_value is < 3675/(98304 c^4);
-    // in log space this contributes at most that amount (since
-    // log(1 + x) <= x for small positive x).
-    const Real next_term_bound = Real(3675) / (Real(98304) * c * c * c * c);
-    return value + next_term_bound;
+    long double rem = 0.0L;
+    const long double v = detail::log_I0_asymptotic(static_cast<long double>(c), &rem);
+    return static_cast<Real>(v + 2.0L * rem) + rounding_pad;
 }
 
 /// Deprecated alias kept for source compatibility; new code should

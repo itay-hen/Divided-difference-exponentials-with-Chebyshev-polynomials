@@ -1913,3 +1913,30 @@ paper_v18.
 - Error messages print estimates with %.3Le instead of std::to_string.
 - New required Group 9 (IncrementalStack).  Status: 8/8 required
   groups pass; clean under ASan+UBSan.
+
+## Fixes after an independent audit (2026-10-28)
+
+- **log I_0(c) for large c (chebyshev_bessel.hpp).**  The four-term
+  asymptotic formula used 75/3072 instead of 225/3072 for the c^-3
+  coefficient: relative error 1.4e-10 at c ~ 700, invisible to the
+  indicator (repro: exp[-1400, 0], error 1.4e-10, indicator 4.6e-14, in
+  both evaluators).  Now the full asymptotic series is summed to
+  convergence; log_I0_upper pads by twice the first omitted term.
+- **Prefactor error in the indicator.**  For full values the indicator
+  now includes u(|d| + c + q + 8) (batch `last_error_estimate`, stack
+  `error_estimate`; ratios and normalized sums are unaffected).
+- **IncrementalStack storage.**  Columns store only the structurally
+  nonzero entries n >= k (no zero-initialized length-Nmax vectors), so a
+  push really costs Theta(Nmax - q) work and memory.
+- **Automatic cache-depth extension.**  If the stopping rule is not met
+  within Nmax (e.g. 50 nodes at +1000 and one at -1000 need N = 506 >
+  default 411), Nmax grows and all columns are extended by the
+  recurrence; the push is retried.
+- **Certified stopping in IncrementalStack** (`StackStopping::Certified`):
+  stop at the first N where the rigorous relative tail bound (5.3) is
+  below tol (log space, log_I0_upper, geometric bound beyond Nmax).
+- New Group 9 tests S5-S7 (prefactor, depth extension, certified mode).
+- `experiments/gbh_compare`: benchmark against the published Gupta-Barash-
+  Hen code (unmodified, CC BY 4.0).  Append+remove cycle 3-470x faster.
+
+Status: 8/8 required groups; Group 9 7/7; clean under ASan+UBSan.

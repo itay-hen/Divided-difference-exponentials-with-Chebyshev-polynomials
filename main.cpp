@@ -1041,6 +1041,50 @@ bool run_stack_tests() {
         report("S4 rejected push leaves stack unchanged",
                threw && st.order() == 2 && st.value() == before, 0.0);
     }
+    // S5 (external audit): large-c prefactor.  exp[-1400, 0] =
+    // (1 - e^{-1400})/1400; the old I_0 asymptotic had a wrong c^-3
+    // coefficient (error 1.4e-10, indicator 5e-14).
+    {
+        const long double exact = (1.0L - std::exp(-1400.0L)) / 1400.0L;
+        chebyshev::ExpDivDiff<double> e(-1400.0, 0.0);
+        const double vb = e.evaluate({-1400.0, 0.0});
+        chebyshev::IncrementalStack<double> st(-1400.0, 0.0, 5);
+        st.initialize({-1400.0, 0.0});
+        const double rb = static_cast<double>(std::abs(vb - exact) / exact);
+        const double rs = static_cast<double>(std::abs(st.value() - exact) / exact);
+        report("S5 large-c prefactor: error <= indicator (batch, stack)",
+               rb <= e.last_error_estimate() && rs <= st.error_estimate() && rb < 1e-12,
+               std::max(rb, rs));
+    }
+    // S6 (external audit): 50 nodes at +1000, one at -1000 needs N = 506
+    // > default Nmax; the stack must deepen its cache, not fail.
+    {
+        std::vector<double> x(51, 1000.0);
+        x[50] = -1000.0;
+        chebyshev::ExpDivDiff<double> e(-1000.0, 1000.0);
+        const auto ref = e.evaluate_scaled(x);
+        chebyshev::IncrementalStack<double> st(-1000.0, 1000.0, 50);
+        st.initialize(x);
+        const double r = std::abs((st.value_scaled() / ref).to_real() - 1.0);
+        report("S6 automatic cache-depth extension", r < 1e-12 && st.depth_extensions() > 0, r);
+    }
+    // S7: certified stopping mode meets its tolerance.
+    {
+        double worst = 0.0;
+        for (double c : {1.0, 10.0, 40.0}) for (int q : {1, 5, 20, 50}) {
+            std::uniform_real_distribution<double> U(-c, c);
+            std::vector<double> x(q + 1);
+            for (auto& v : x) v = U(rng);
+            x[0] = c;
+            chebyshev::IncrementalStack<double> st(-c, c, q + 2, 1e-14, -1,
+                                                   chebyshev::StackStopping::Certified);
+            try { st.initialize(x); } catch (const std::runtime_error&) { continue; }
+            const double m = mccurdy_templated::ExpDivDiff<double>::compute(x);
+            worst = std::max(worst, std::abs(st.value() - m) / m);
+        }
+        report("S7 certified stopping vs MNP", worst < 1e-12, worst);
+    }
+
     std::printf("  %d/%d stack tests passed\n", passes, total);
     const bool ok = (passes == total);
     std::printf("=== %s ===\n", ok ? "Group 9 PASS" : "Group 9 FAIL");

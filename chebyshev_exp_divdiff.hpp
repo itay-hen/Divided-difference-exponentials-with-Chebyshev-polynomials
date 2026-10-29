@@ -266,7 +266,8 @@ public:
         const ScaledReal S = evaluate_core_(nodes, &kappa_eps, &n_used);
         if (n_out) *n_out = n_used;
         last_kappa_eps_ = kappa_eps;
-        last_error_estimate_ = kappa_eps * n_used;
+        // Full value: add the rounding error of the prefactor.
+        last_error_estimate_ = kappa_eps * n_used + prefactor_error_estimate(q);
         if (last_error_estimate_ > max_error_estimate_) {
             if (node_min > a_ || node_max < b_) {
                 return evaluate_tight_(nodes, node_min, node_max, n_out);
@@ -284,8 +285,23 @@ public:
     long double last_condition_estimate() const { return last_kappa_eps_; }
 
     /**
-     * @brief Rounding-error indicator kappa * u * N of the most recent
-     *        evaluation (N = number of Chebyshev orders used).  The
+     * @brief Relative rounding error of the prefactor e^d I_0(c) / c^q,
+     *        estimated as u (|d| + c + q + 8): e^d, I_0(c) ~ e^c and c^q
+     *        amplify the rounding of d and c by |d|, ~c and q.  Included
+     *        in last_error_estimate() for full values (evaluate,
+     *        evaluate_scaled); not for normalized sums or ratios, where
+     *        the prefactor cancels.
+     */
+    long double prefactor_error_estimate(int q) const {
+        return static_cast<long double>(std::numeric_limits<Real>::epsilon()) *
+               (std::abs(static_cast<long double>(d_)) +
+                static_cast<long double>(c_) + q + 8.0L);
+    }
+
+    /**
+     * @brief Rounding-error indicator of the most recent evaluation:
+     *        kappa * u * N (N = number of Chebyshev orders used), plus
+     *        prefactor_error_estimate(q) for full values.  The
      *        factor N accounts for round-off accumulated in the
      *        Chebyshev divided-difference recurrence; in the
      *        manuscript's experiments the observed relative error did
