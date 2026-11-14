@@ -47,6 +47,10 @@ struct TestResult {
     
     int batch_iterations;
     int incr_cached_layers;
+    int incr_used_order;       // Chebyshev order at which the stopping
+                               // rule fired in the incremental eval;
+                               // typically much smaller than the cached
+                               // depth.
     
     double relative_error;
     double normalized_relative_error;
@@ -66,7 +70,8 @@ inline void print_header() {
               << std::setw(24) << "Incremental Value"
               << std::setw(15) << "Rel Error"
               << std::setw(12) << "Batch n"
-              << std::setw(12) << "Incr N"
+              << std::setw(12) << "Incr Nmax"
+              << std::setw(10) << "Incr used"
               << std::setw(12) << "Status"
               << std::endl;
     std::cout << std::string(140, '-') << std::endl;
@@ -90,7 +95,8 @@ inline void print_result(const TestResult& result) {
     
     std::cout << std::fixed << std::setprecision(0);
     std::cout << std::setw(12) << result.batch_iterations
-              << std::setw(12) << result.incr_cached_layers;
+              << std::setw(12) << result.incr_cached_layers
+              << std::setw(10) << result.incr_used_order;
     
     // Status indicator
     std::string status;
@@ -178,6 +184,7 @@ inline TestResult run_single_test(double a, double b, int q, int trial,
     result.incr_value = incr_eval.initialize(result.nodes);
     result.incr_normalized = incr_eval.get_normalized_value();
     result.incr_cached_layers = incr_eval.num_cached_layers();
+    result.incr_used_order    = incr_eval.last_used_order();
     
     // Compute errors
     result.relative_error = std::abs(result.batch_value - result.incr_value) / 

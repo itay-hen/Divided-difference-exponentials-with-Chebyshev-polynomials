@@ -197,62 +197,84 @@ inline std::vector<double> generate_random_nodes(int count, double b, std::mt199
 /**
  * @brief Run a single trial
  */
+/**
+ * @brief Run a single trial.
+ *
+ * Both methods are evaluated at the same working precision `Real`,
+ * which defaults to `double`.  Pass `long double` (or another type
+ * supported by the templated classes) to run the matched-precision
+ * comparison at higher accuracy.
+ *
+ * The earlier version of this routine used `mccurdy_templated::
+ * ExpDivDiff<long double>` as a "reference" against which both the
+ * double-precision MNP and double-precision Chebyshev were compared.
+ * That setup produced a precision-asymmetric comparison: the MNP
+ * value got to check itself in higher precision, while Chebyshev was
+ * being compared against a different algorithm.  We now compute both
+ * methods at the same `Real` and store one of them (MNP) as the
+ * reference column purely so the CSV format is unchanged; the
+ * meaningful column is `chebyshev_error`, which is the relative
+ * difference between MNP and Chebyshev at matched precision.  For
+ * a true independent accuracy check, use test_against_reference.hpp
+ * with the mpmath ground truth.
+ */
+template<typename Real = double>
 inline TrialResult run_single_trial(double b, int q, int trial_num, std::mt19937& rng) {
     TrialResult result;
     result.b = b;
     result.q = q;
     result.trial = trial_num;
-    
-    // Generate random nodes
-    std::vector<double> nodes = generate_random_nodes(q + 1, b, rng);
-    std::vector<long double> nodes_ld(nodes.begin(), nodes.end());
-    
-    // Compute reference using long double McCurdy
-    try {
-        result.reference_result = static_cast<double>(
-            mccurdy_templated::ExpDivDiff<long double>::compute(nodes_ld)
-        );
-    } catch (...) {
-        // If reference fails, this trial is invalid
-        return result;
-    }
-    
-    // Test McCurdy (double)
+
+    // Generate random nodes at working precision.
+    std::vector<double> nodes_d = generate_random_nodes(q + 1, b, rng);
+    std::vector<Real> nodes(q + 1);
+    for (int i = 0; i <= q; ++i) nodes[i] = static_cast<Real>(nodes_d[i]);
+
+    // Test McCurdy at working precision Real.
     try {
         auto start = std::chrono::high_resolution_clock::now();
-        result.mccurdy_result = mccurdy_templated::ExpDivDiff<double>::compute(nodes);
+        Real mc = mccurdy_templated::ExpDivDiff<Real>::compute(nodes);
         auto end = std::chrono::high_resolution_clock::now();
-        
-        result.mccurdy_time_us = std::chrono::duration<double, std::micro>(end - start).count();
-        result.mccurdy_valid = !std::isnan(result.mccurdy_result) && !std::isinf(result.mccurdy_result);
-        
-        if (result.mccurdy_valid) {
-            result.mccurdy_error = std::abs((result.mccurdy_result - result.reference_result) / result.reference_result);
-        }
+        result.mccurdy_result = static_cast<double>(mc);
+        result.mccurdy_time_us =
+            std::chrono::duration<double, std::micro>(end - start).count();
+        result.mccurdy_valid = !std::isnan(result.mccurdy_result) &&
+                               !std::isinf(result.mccurdy_result);
     } catch (...) {
         result.mccurdy_valid = false;
     }
-    
-    // Test Chebyshev
+    // Use the same-precision MNP value as the reference column.
+    // mccurdy_error is therefore 0 by construction (kept for CSV
+    // backward compat); the meaningful pairwise metric below is
+    // chebyshev_error.
+    result.reference_result = result.mccurdy_result;
+    result.mccurdy_error    = 0.0;
+
+    // Test Chebyshev at the SAME working precision Real.
     try {
-        chebyshev::ExpDivDiff<double> chebyshev_solver(-b, b);
-        
+        chebyshev::ExpDivDiff<Real> chebyshev_solver(
+            static_cast<Real>(-b), static_cast<Real>(b));
         auto start = std::chrono::high_resolution_clock::now();
         int n_terms = 0;
-        result.chebyshev_result = chebyshev_solver.evaluate(nodes, &n_terms);
+        Real cheb = chebyshev_solver.evaluate(nodes, &n_terms);
         auto end = std::chrono::high_resolution_clock::now();
-        
-        result.chebyshev_time_us = std::chrono::duration<double, std::micro>(end - start).count();
+        result.chebyshev_result = static_cast<double>(cheb);
+        result.chebyshev_time_us =
+            std::chrono::duration<double, std::micro>(end - start).count();
         result.chebyshev_n_terms = n_terms;
-        result.chebyshev_valid = !std::isnan(result.chebyshev_result) && !std::isinf(result.chebyshev_result);
-        
-        if (result.chebyshev_valid) {
-            result.chebyshev_error = std::abs((result.chebyshev_result - result.reference_result) / result.reference_result);
+        result.chebyshev_valid = !std::isnan(result.chebyshev_result) &&
+                                 !std::isinf(result.chebyshev_result);
+        if (result.chebyshev_valid && result.mccurdy_valid &&
+            std::abs(result.reference_result) > 0.0) {
+            // Pairwise MNP-vs-Chebyshev relative difference at matched precision.
+            result.chebyshev_error =
+                std::abs((result.chebyshev_result - result.reference_result)
+                         / result.reference_result);
         }
     } catch (...) {
         result.chebyshev_valid = false;
     }
-    
+
     return result;
 }
 
@@ -458,6 +480,18 @@ inline void print_summary(const std::vector<ComboStats>& stats, std::ostream& os
  * @param config Test configuration (default: TestConfig::create_default())
  * @param os Output stream for progress (default: std::cout)
  */
+/**
+ * @brief Run all comparison tests at working precision `Real`.
+ *
+ * Both MNP and Chebyshev are evaluated at `Real` precision (default
+ * `double`); the matched-precision design is the whole point.  Pass
+ * `long double` to run the higher-precision matched comparison.
+ *
+ * @param output_prefix Prefix for output CSV files.
+ * @param config        Test configuration.
+ * @param os            Progress stream.
+ */
+template<typename Real = double>
 inline void run_all_tests(const std::string& output_prefix = "comparison",
                           const TestConfig& config = TestConfig::create_default(),
                           std::ostream& os = std::cout) {
@@ -466,7 +500,9 @@ inline void run_all_tests(const std::string& output_prefix = "comparison",
     os << "║  McCurdy vs Chebyshev: Comprehensive Comparison                           ║\n";
     os << "╚════════════════════════════════════════════════════════════════════════════╝\n";
     os << "\n";
-    
+
+    os << "Working precision: "
+       << (sizeof(Real) > sizeof(double) ? "long double" : "double") << "\n";
     os << "Configuration:\n";
     os << "  b values: " << config.b_values.size() << " (from "
        << config.b_values.front() << " to " << config.b_values.back() << ")\n";
@@ -476,29 +512,29 @@ inline void run_all_tests(const std::string& output_prefix = "comparison",
     os << "  Total combinations: " << config.b_values.size() * config.q_values.size() << "\n";
     os << "  Expected total trials: "
        << config.b_values.size() * config.q_values.size() * config.n_trials << "\n\n";
-    
+
     os << "Running tests...\n";
-    
+
     std::mt19937 rng(config.random_seed);
     std::vector<TrialResult> all_results;
     std::vector<ComboStats> all_stats;
-    
+
     int total_combos = config.b_values.size() * config.q_values.size();
     int combo_count = 0;
-    
+
     for (double b : config.b_values) {
         for (int q : config.q_values) {
             std::vector<TrialResult> combo_results;
-            
+
             for (int trial = 0; trial < config.n_trials; ++trial) {
-                TrialResult result = run_single_trial(b, q, trial, rng);
+                TrialResult result = run_single_trial<Real>(b, q, trial, rng);
                 combo_results.push_back(result);
                 all_results.push_back(result);
             }
-            
+
             ComboStats stats = compute_combo_stats(combo_results);
             all_stats.push_back(stats);
-            
+
             combo_count++;
             print_progress(combo_count, total_combos, "Progress");
         }
@@ -536,6 +572,7 @@ inline void run_all_tests(const std::string& output_prefix = "comparison",
  * @param random_seed Random seed (default: 12345)
  * @param os Output stream (default: std::cout)
  */
+template<typename Real = double>
 inline void test_single_case(double b, int q, int n_trials = 100,
                              unsigned int random_seed = 12345,
                              std::ostream& os = std::cout) {
@@ -544,27 +581,29 @@ inline void test_single_case(double b, int q, int n_trials = 100,
     os << "║  McCurdy vs Chebyshev: Single Case Test                                   ║\n";
     os << "╚════════════════════════════════════════════════════════════════════════════╝\n";
     os << "\n";
-    
+
+    os << "Working precision: "
+       << (sizeof(Real) > sizeof(double) ? "long double" : "double") << "\n";
     os << "Configuration:\n";
     os << "  Interval: [-" << b << ", " << b << "]\n";
     os << "  Divided difference order: q = " << q << " (" << (q+1) << " nodes)\n";
     os << "  Number of trials: " << n_trials << "\n";
     os << "  Random seed: " << random_seed << "\n\n";
-    
+
     std::mt19937 rng(random_seed);
     std::vector<TrialResult> results;
-    
+
     os << "Running trials...\n";
     for (int trial = 0; trial < n_trials; ++trial) {
-        TrialResult result = run_single_trial(b, q, trial, rng);
+        TrialResult result = run_single_trial<Real>(b, q, trial, rng);
         results.push_back(result);
-        
+
         if ((trial + 1) % 10 == 0 || trial == 0) {
             print_progress(trial + 1, n_trials, "Progress");
         }
     }
     os << "\n\n";
-    
+
     // Print results table
     os << "Results:\n";
     os << std::setw(8) << "Trial"
