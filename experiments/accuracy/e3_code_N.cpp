@@ -1,6 +1,6 @@
 // =============================================================================
 // e3_code_N.cpp -- Experiment E3 helper: the number of Chebyshev orders N
-// actually chosen by the double-precision code (heuristic stopping rule,
+// actually chosen by the double-precision code (certified stopping rule,
 // tol = 1e-14) for given node sets on the EXACT interval [-c, c].
 //
 // Build (from the "DDEF c++" folder):

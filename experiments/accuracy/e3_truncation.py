@@ -121,8 +121,10 @@ def run_case(q, c, code_row):
                 tail[n] = acc                            # sum_{m > n}
                 acc += Bt[n]
             BN = [t / lower for t in tail]
-        out[dps] = (e, tN, BN, partial[-1], S)
-    e, tN, BN, SNmax, S = out[dps0 + 60]
+            # a posteriori bound used by the code: tau_N / |S_N|
+            BP = [t / abs(p) if p != 0 else mpmath.inf for t, p in zip(tail, partial)]
+        out[dps] = (e, tN, BN, partial[-1], S, BP)
+    e, tN, BN, SNmax, S, BP = out[dps0 + 60]
     e_lo = out[dps0][0]
     # precision check on the converged partial sum and on e_N where e_N > 1e-40
     prec_ok = all(abs(a - b) <= mpf("1e-3") * b for a, b in zip(e_lo, e) if b > mpf("1e-40"))
@@ -138,7 +140,8 @@ def run_case(q, c, code_row):
     S_code = float(code_row["S_mant"]) * 2.0 ** int(code_row["S_exp"])
     with mp.workdps(40):
         code_err = abs(mpf(S_code) - S) / abs(S)
-    return dict(q=q, c=c, x=x, e=e, tN=tN, BN=BN, Nmax=Nmax, dps=dps0 + 60,
+    return dict(q=q, c=c, x=x, e=e, tN=tN, BN=BN, BP=BP, Nmax=Nmax, dps=dps0 + 60,
+                N_post=first_below(BP, mpf(TOL) / 4),
                 prec_ok=prec_ok, N_true=first_below(e, mpf(TOL)),
                 N_bound=first_below(BN, mpf(TOL)), N_code=Ncode,
                 eN_at_code=e[Ncode], BN_at_code=BN[Ncode],
@@ -163,23 +166,25 @@ def main():
 
     with open(a.csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["q", "c", "N", "true_rel_trunc_err", "per_term_rel", "bound_rel"])
+        w.writerow(["q", "c", "N", "true_rel_trunc_err", "per_term_rel", "bound_rel",
+                    "post_bound_rel"])
         for r in results:
             for n in range(r["Nmax"] + 1):
                 w.writerow([r["q"], r["c"], n, mpmath.nstr(r["e"][n], 6),
-                            mpmath.nstr(r["tN"][n], 6), mpmath.nstr(r["BN"][n], 6)])
+                            mpmath.nstr(r["tN"][n], 6), mpmath.nstr(r["BN"][n], 6),
+                            mpmath.nstr(r["BP"][n], 6)])
     with open(a.summary, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["q", "c", "N_true_lt_tol", "N_bound_lt_tol", "N_code",
+        w.writerow(["q", "c", "N_true_lt_tol", "N_bound_lt_tol", "N_post_lt_tol4", "N_code",
                     "eN_at_N_code", "BN_at_N_code", "code_total_rel_err", "code_kuN",
                     "prod_status", "dps", "precision_check_ok", "nodes"])
         for r in results:
-            w.writerow([r["q"], r["c"], r["N_true"], r["N_bound"], r["N_code"],
+            w.writerow([r["q"], r["c"], r["N_true"], r["N_bound"], r["N_post"], r["N_code"],
                         mpmath.nstr(r["eN_at_code"], 4), mpmath.nstr(r["BN_at_code"], 4),
                         mpmath.nstr(r["code_total_err"], 4), f"{r['code_kuN']:.3e}",
                         r["prod_status"], r["dps"], r["prec_ok"],
                         " ".join(f"{v:.17g}" for v in r["x"])])
-            print(r["q"], r["c"], "N_true", r["N_true"], "N_bound", r["N_bound"],
+            print(r["q"], r["c"], "N_true", r["N_true"], "N_bound", r["N_bound"], "N_post", r["N_post"],
                   "N_code", r["N_code"], "e_N(code)", mpmath.nstr(r["eN_at_code"], 3),
                   "code err", mpmath.nstr(r["code_total_err"], 3), "kuN", r["code_kuN"],
                   r["prod_status"], "prec_ok", r["prec_ok"])
@@ -194,14 +199,16 @@ def main():
     for ax, r in zip(axs, results):
         n = np.arange(r["Nmax"] + 1)
         f = lambda arr: np.array([float(max(v, mpf(floor) / 10)) for v in arr])
-        e, tN, BN = f(r["e"]), f(r["tN"]), f(r["BN"])
+        e, tN, BN, BP = f(r["e"]), f(r["tN"]), f(r["BN"]), f(r["BP"])
         tmask = tN > floor
-        ax.semilogy(n, BN, color=P[1], lw=1.2, label=r"certified bound $B_N$")
+        ax.semilogy(n, BN, color=P[1], lw=1.2, label=r"a priori bound (5.3)")
+        ax.semilogy(n, BP, color=P[4 % len(P)], lw=1.0, ls="-.",
+                    label=r"a posteriori bound $\tau_N/|S_N|$")
         ax.semilogy(n, e, color=P[0], lw=1.4, label=r"true error $e_N$")
         ax.semilogy(n[tmask], tN[tmask], ".", color=P[2], ms=2.2,
                     label=r"term size $|2R_ND_q^{(N)}|/|S|$")
         ax.axhline(TOL, color="0.5", lw=0.6, ls=":")
-        ax.axvline(r["N_code"], color=P[3], lw=0.9, ls="--", label=r"$N$ chosen by code")
+        ax.axvline(r["N_code"], color=P[3], lw=0.9, ls="--", label=r"$N$ chosen by Alg. 1")
         ax.set_ylim(1e-20, 1e12)
         xmax = max(r["N_bound"] or 0, r["N_code"]) * 1.25 + 5
         ax.set_xlim(0, min(r["Nmax"], xmax))

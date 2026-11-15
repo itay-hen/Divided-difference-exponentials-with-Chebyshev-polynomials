@@ -22,7 +22,8 @@
 // in nonincreasing order (set_sort_nodes(true)); the fourth keeps the
 // caller's order:
 //   prod  : E.evaluate_scaled() on [a,b] = [-c,c] with the default
-//           threshold 1e-10 on kappa*u*N -- what a user gets.  Status is
+//           threshold 1e-10 on kappa*u*N -- what a user gets (including
+//           the retries on [min x, max x] and [min x - s w, max x], s = 1, 2).  Status is
 //           "ok", "refused" (conditioning throw) or "noconv" (max_iter).
 //   ab    : the same call with set_max_error_estimate(1e300), i.e. the
 //           un-retried value on [a,b] (or on [min x, max x] when the

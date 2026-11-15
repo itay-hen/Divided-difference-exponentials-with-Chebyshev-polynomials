@@ -1940,3 +1940,116 @@ paper_v18.
   Hen code (unmodified, CC BY 4.0).  Append+remove cycle 3-470x faster.
 
 Status: 8/8 required groups; Group 9 7/7; clean under ASan+UBSan.
+
+## Fixes after a second independent audit (2026-11-14)
+
+- **Stopping rule (critical).**  The window rule (stop after W = 5
+  consecutive terms below tol |S|) stopped early on node sets whose
+  Chebyshev divided differences vanish for long runs of n.  At
+  Chebyshev-Lobatto points y_j = cos(pi j/q), D_q^(n) != 0 only for
+  n = q (mod 2q); for q = 3, nodes {-10,-5,5,10} on [-10,10], both
+  evaluators returned 14.067 instead of 14.486 (2.9% error) with an
+  indicator of 6e-15.  Both evaluators now default to
+  `StoppingRule::Certified`: stop once the rigorous tail bound
+  tau_N = 2 sum_{n>N} R_n B(n,q) <= 2 t_{N+1}/(1-r) is at most tol/4 times
+  the computed |S_N| (a posteriori form of (5.3); no e^{d - min x}
+  factor).  Batch: the bound is updated in mantissa/exponent form, O(1)
+  per test, evaluated only when the current term is small.  Stack: each
+  push sums its whole column (already computed to Nmax) and certifies the
+  tail beyond Nmax, else deepens the cache.  The old rule remains as
+  `StoppingRule::Window` (documented as unsafe).  The indicator kappa*u*N
+  now uses the effective N (last term above u |S|).
+- **Stack range (major).**  Weighted columns could overflow on perfectly
+  conditioned input (q = 319 equal nodes at b on [-4000,0]).  Columns now
+  carry a binary exponent (inherited from the parent; prefix shifted by
+  2^-400 when an entry exceeds 2^400; renormalized upward if tiny); level
+  sums are ScaledReal.  `extend_` applies the same scaling.
+- **Ratio diagnostics.**  `evaluate_ratio` overwrote the numerator's
+  indicator with the denominator's (zero for an all-equal denominator).
+  It now reports the sum of both indicators and gates on it.
+- **Default stack depth.**  Smallest Nmax at which the certified tail
+  bound holds at order q_max for a sum of typical size.
+- Tests: Group 10 (T1-T6): Lobatto gap, Lobatto node sets q <= 40 vs MNP,
+  601 equal nodes at b on [-4000,0], alternating nodes, depth extension
+  with rescaled columns, ratio diagnostics.  S6 now starts from an
+  explicitly shallow cache.
+- New experiment `experiments/accuracy/e4_stopping_rule.cpp`; master
+  script `experiments/run_v19.sh` regenerates all data and figures.
+
+Status: 9/9 required groups (Group 10: 6/6); clean under ASan+UBSan.
+All data and figures regenerated in Data and figures/v19 and tex/figs_v19.
+
+## Fixes after a third independent audit (2026-11-14)
+
+- **All-equal shortcut (localized).**  `evaluate_scaled` returned
+  e^x/q! via exp2(frac(x/ln2)) in long double, which loses ~|x| u_ld in
+  the exponent's fractional part, and reported a zero error estimate.
+  Measured on arm64 (53-bit long double): 4.6e-7 at x = 1e10 and 1.9e-5
+  at x = 1e12 (the auditor saw 2.5e-10 / 4.7e-8 with x87).  Now:
+  `detail::exp_split` forms x = k ln2 + r with k ln2 exact (fma two-product,
+  ln2 as a triple-double; Sterbenz for x - p), error O(u (1 + |x| u));
+  q! is a compensated (double-word) product, error O(u + q u^2).  The
+  estimate (sum of both, plus 2u) is reported and checked against
+  `max_error_estimate`.  Measured error <= 1.6e-16 for |x| <= 3e14,
+  q <= 200000.  The normalized all-equal branch now reports an estimate
+  from the rounding of its four log terms.
+- **Same defect in e^d for large midpoints.**  `scaling_factor_scaled_`
+  and `IncrementalStack::prefactor_` used the same conversion when e^d
+  overflows; both use `exp_split` now.  The prefactor estimate drops its
+  u|d| term (d is an exact Real; e^d is now accurate), so general nodes
+  at a large common shift (e.g. x ~ 1e12) are evaluated to ~1e-16 instead
+  of being refused.
+- **Paper: certified depth margin.**  Section 3 claimed the append cost
+  Theta(Nmax - q) is O(sqrt(c ln 1/eps)) plus q_max - q.  For
+  q_max >> c the certificate reduces to sum_{m>M} c^m/m! <= eps/4, so
+  Nmax - q_max ~ e c + ln(1/eps): linear in c (constructor: 300, 844,
+  2745 at c = 100, 300, 1000, q_max = 1e6).  Corrected in the paper
+  (new paragraph "Size of the depth margin") and in the response letter.
+- Tests: Group 11 (U1-U5): equal nodes at 1e10, 1e12 and q = 200000 vs
+  mpmath, threshold enforcement, shifted general nodes at 1e12 (batch and
+  stack).
+
+Status: 10/10 required groups (Group 11: 5/5); clean under ASan+UBSan.
+No experiment data changes: the value changes affect only all-equal
+inputs and |d| > ~709, which no experiment uses; dropping u|d| from the
+prefactor estimate changes it by <= 2e-14 (|d| <= 100 in all experiments),
+and no accuracy case is within 1% of the 1e-10 threshold.
+
+## Round 4: PMR-QMC traces, interval choice, manuscript v20 (2026-11-15)
+
+- **Real PMR-QMC traces.**  `experiments/pmr_traces/`: the operation
+  stream (append, remove last, remove interior value, clear, read) of the
+  PMR-QMC code of Barash, Babakhani & Hen was recorded for 2D Heisenberg
+  4x4 / 8x8 and TFIM 32 / 64 at several beta, and replayed with GBH (the
+  divdiff class PMR-QMC uses), the batch method, and the incremental
+  stack.  Findings:
+  * The node sets occupy a few levels with a handful of nodes at the top
+    and the bulk tens of units below.  On the tight interval the Chebyshev
+    series refused up to 99.5% of them (correctly: errors up to O(1)).
+  * Cause: in the order-dominated regime (q >~ c) the leading terms have
+    the size of the sum for nodes at the midpoint d, so a set below d
+    cancels by ~e^{d - xi} (ln kappa vs d - xi: slope 1.1-1.4).  Lowering
+    a to min x - w puts d at the smallest node and removes it: 1199/1200
+    sampled reads accepted, max error 1.8e-13 against exact values.
+  * Batch (with the new retry) was 1.7-36x faster than GBH on these
+    traces; the incremental stack was slower than batch (interior removals
+    and the need for sorted prefixes force ~16 pushes per append).
+- **`evaluate()` retry sequence.**  [a, b] -> [min x, max x] ->
+  [min x - s w, max x], s = 1, 2 (`evaluate_tight_`, `evaluate_once_on_`);
+  every value is still gated by its own indicator.  Also applies when
+  [a, b] is already tight.  `set_lowered_retry(false)` restores the old
+  behaviour.  New `evaluate_scaled_fixed()` (constructor interval only, no
+  retries) for callers that manage intervals themselves.
+- Tests: Group 11 U6 (PMR-like multiset, q = 120: refused on the tight
+  interval, accepted to 5e-15 with the retry).
+- All experiments regenerated (`experiments/run_v20.sh`, data in
+  `Data and figures/v20`, figures in `tex/figs_v20`); new table scripts
+  `gbh_compare/make_table.py`, `pmr_traces/make_table.py`.
+- Manuscript v20 (main text + supplement): toy chain, MNP details,
+  truncation-bound figure, ordering and interval figures, microbenchmarks
+  and the e^{-beta x} section moved to the supplement.
+
+Status (v20): 10/10 required groups (Group 11: 6/6); clean under ASan+UBSan.
+Accuracy study: 525 refusals of 10206 (was 1806), max accepted error
+2.1e-13, max error/indicator 0.17.  PMR traces: 1399/1400 sampled reads
+accepted, max error 1.8e-13 against exact values.

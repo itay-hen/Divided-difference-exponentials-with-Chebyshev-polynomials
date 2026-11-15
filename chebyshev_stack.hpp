@@ -18,38 +18,42 @@
 //     W_k^(n+1) = 2 rho_{n+1} ( y_k W_k^(n) + W_{k-1}^(n) / (2 rho_k) )
 //                 - rho_{n+1} rho_n W_k^(n-1),        rho_n = I_n(c)/I_{n-1}(c).
 //
-// The similarity does not change relative rounding errors, but it removes
-// every range problem of the unweighted table: each row starts at
-// W_k^(k) = 1 (D_k^(k) = 2^{k-1}), the entries are the series terms
-// themselves divided by 2 sigma_k, so they neither overflow (unless the
-// sum is catastrophically ill-conditioned) nor underflow before they are
-// negligible.  sigma_k is kept in mantissa/exponent form; it cancels in
-// ratios of divided differences of the same order.
+// Each row starts at W_k^(k) = 1, and the entries are the series terms
+// divided by 2 sigma_k, so they cannot underflow before they are
+// negligible.  They can, however, exceed the range of Real even when the
+// sum is perfectly conditioned (e.g. q = 319 equal nodes at b on
+// [-4000, 0]: every term is positive, but the terms reach ~e^{900}).
+// Each column therefore carries a binary exponent e_k (stored value
+// = W 2^{-e_k}): a column inherits its parent's exponent, its built prefix
+// is shifted down by 2^400 whenever an entry exceeds 2^400 (exact up to
+// underflow of negligible entries), and it is renormalized upward after
+// construction if its largest entry is tiny.  sigma_k and the column sums
+// are kept in mantissa/exponent form.
 //
 // Costs.  The structural zeros W_k^(n) = 0, n < k, are not stored, so
-// push() computes and stores Nmax - k + 1 entries: Theta(Nmax - q) work
-// and memory.  The sum for the new top is accumulated until the stopping
-// rule is met (O(N')), and is cached per level, so pop() is O(1).
+// push() computes, stores and sums Nmax - k + 1 entries: Theta(Nmax - q)
+// work and memory.  The sum is cached per level, so pop() is O(1).
 //
-// Cache depth.  If the stopping rule is not met within Nmax, the depth is
-// increased and all stored columns are extended by the recurrence (a
-// one-time Theta(q * Delta N) cost), and the push is retried.
-//
-// Stopping rules.  Window (default): Algorithm 1's heuristic -- stop at
-// the first n >= k + 5 at which the last 5 terms are below tol*|S|.
-// Certified: stop at the first N at which the rigorous relative tail
-// bound (5.3) of the manuscript is below tol, evaluated in log space with
-// an upper estimate of log I_0(c) and a geometric bound for the tail
-// beyond Nmax (a conservative floating-point evaluation of a rigorous
-// bound, not an interval-arithmetic certificate).
+// Stopping rules.  Certified (default): every push sums its column up to
+// the cache depth Nmax and accepts it only if the rigorous bound (5.3) on
+// the tail beyond Nmax, 2 sum_{n>Nmax} R_n B(n,k), is at most tol/4 times
+// the computed |S|; otherwise the depth is increased (all stored columns
+// are extended by the recurrence, a one-time Theta(q * Delta N) cost) and
+// the push is retried.  The bound is evaluated in floating point (a
+// conservative evaluation of a rigorous bound, not an interval-arithmetic
+// certificate).  Window: Algorithm 1's heuristic -- stop at the first
+// n >= k + 5 at which the last 5 terms are below tol |S|; NOT safe, since
+// D_k^(n) can vanish for long runs of n (Chebyshev--Lobatto nodes).
 //
 // Accuracy safeguard.  Every prefix x_0..x_k is evaluated and gated when
 // it is pushed: if its error indicator kappa*u*N exceeds the threshold
-// (default 1e-10), push() throws and leaves the stack unchanged.  The
-// divided difference is symmetric, but the rounding errors of the
-// recurrence depend on the processing order (manuscript, Sec. 4.3);
-// gating every prefix detects unfavorable insertion orders, and
-// initialize() inserts the initial set in nonincreasing order.
+// (default 1e-10), push() throws and leaves the stack unchanged.  N is
+// the effective number of terms (the last index at which a term exceeds
+// u times the running sum).  The divided difference is symmetric, but
+// the rounding errors of the recurrence depend on the processing order
+// (manuscript, Sec. 4.3); gating every prefix detects unfavorable
+// insertion orders, and initialize() inserts the initial set in
+// nonincreasing order.
 // =============================================================================
 
 #include "chebyshev_exp_divdiff.hpp"
@@ -64,7 +68,7 @@
 
 namespace chebyshev {
 
-enum class StackStopping { Window, Certified };
+using StackStopping = StoppingRule;   // Certified (default) or Window
 
 template<typename Real = double>
 class IncrementalStack {
@@ -76,13 +80,15 @@ public:
      * @param q_max     Largest order that will be reached (sets Nmax when
      *                  nmax < 0).
      * @param tol       Relative tolerance of the stopping rule.
-     * @param nmax      Initial cache depth Nmax; default (-1) chooses
-     *                  q_max + 1.3 sqrt(2 c ln(1/tol)) + 30.  The depth is
-     *                  increased automatically when a push needs more.
-     * @param stopping  StackStopping::Window (default) or ::Certified.
+     * @param nmax      Initial cache depth Nmax; default (-1) chooses the
+     *                  smallest depth at which the certified tail bound
+     *                  holds for order q_max and a sum of typical size
+     *                  (nodes near the midpoint).  The depth is increased
+     *                  automatically when a push needs more.
+     * @param stopping  StoppingRule::Certified (default) or ::Window.
      */
     IncrementalStack(Real a, Real b, int q_max, Real tol = Real(1e-14), int nmax = -1,
-                     StackStopping stopping = StackStopping::Window)
+                     StackStopping stopping = StackStopping::Certified)
         : a_(a), b_(b), tol_(tol), q_max_(q_max), stopping_(stopping) {
         if (!(b > a) || !std::isfinite(static_cast<double>(a)) ||
             !std::isfinite(static_cast<double>(b))) {
@@ -92,10 +98,30 @@ public:
         if (!(tol > Real(0))) throw std::invalid_argument("IncrementalStack: tol <= 0");
         c_ = b / 2 - a / 2;
         d_ = b / 2 + a / 2;
+        const double L = std::log(1.0 / static_cast<double>(tol));
+        const int guess = q_max + static_cast<int>(std::ceil(
+                              1.3 * std::sqrt(2.0 * static_cast<double>(c_) * L))) + 30;
         if (nmax < 0) {
-            const double L = std::log(1.0 / static_cast<double>(tol));
-            nmax = q_max + static_cast<int>(std::ceil(
-                       1.3 * std::sqrt(2.0 * static_cast<double>(c_) * L))) + 30;
+            if (stopping_ == StackStopping::Window) {
+                nmax = guess;
+            } else {
+                // Smallest depth M with 2 sum_{n>M} R_n B(n,q_max) <=
+                // (tol/4) S_typ, S_typ = c^q / (q! I_0(c)) (the value of S
+                // for nodes at the midpoint).
+                int M = std::max(q_max + W_ + 1, 8);
+                compute_rho_(std::max(guess, M) + 64);
+                const long double lc = std::log(static_cast<long double>(c_));
+                const long double log_S_typ =
+                    q_max * lc - std::lgamma(static_cast<long double>(q_max + 1))
+                    - static_cast<long double>(chebyshev_bessel::log_I0_upper(c_));
+                const long double log_goal =
+                    std::log(static_cast<long double>(tol) / 4.0L) + log_S_typ;
+                for (;; ++M) {
+                    if (M + 1 >= static_cast<int>(rho_.size())) compute_rho_(2 * M + 64);
+                    if (log_tail_beyond_(q_max, M) <= log_goal) break;
+                }
+                nmax = M;
+            }
         }
         if (nmax < q_max + W_ + 1) {
             throw std::invalid_argument("IncrementalStack: nmax must exceed q_max + 5");
@@ -135,18 +161,21 @@ public:
         const Real y = (x - d_) / c_;
         const Real xmin = (k == 0) ? x : std::min(levels_.back().xmin, x);
 
+        ScaledReal sigma;
+        if (k == 0) {
+            sigma.mantissa = Real(0.5); sigma.exponent = 0; sigma.normalize();
+        } else {
+            ScaledReal two_rho;
+            two_rho.mantissa = Real(2) * rho_[k]; two_rho.exponent = 0;
+            two_rho.normalize();
+            sigma = levels_.back().sigma * two_rho;
+        }
+
         for (;;) {
-            Column col = build_column_(k, y);
+            Column col;
             Level lv;
-            if (sum_column_(col, k, xmin, lv)) {
-                if (k == 0) {
-                    lv.sigma.mantissa = Real(0.5); lv.sigma.exponent = 0; lv.sigma.normalize();
-                } else {
-                    ScaledReal two_rho;
-                    two_rho.mantissa = Real(2) * rho_[k]; two_rho.exponent = 0;
-                    two_rho.normalize();
-                    lv.sigma = levels_.back().sigma * two_rho;
-                }
+            lv.sigma = sigma;
+            if (build_column_(k, y, col, lv)) {
                 lv.xmin = xmin;
                 if (lv.error_estimate > max_error_estimate_) {
                     last_rejected_estimate_ = lv.error_estimate;
@@ -188,8 +217,7 @@ public:
     /// Normalized sum S of the current set (exp[x] = e^d I_0(c) c^{-q} S).
     ScaledReal normalized_scaled() const {
         const Level& lv = top_();
-        ScaledReal t; t.mantissa = lv.T; t.exponent = 0; t.normalize();
-        return lv.sigma * t;
+        return lv.sigma * lv.T;
     }
 
     /// exp[x_0, ..., x_q] of the current set, in mantissa/exponent form.
@@ -216,27 +244,31 @@ public:
     }
 
 private:
-    /// Column k: entries W_k^(n) for n = start..nmax_, stored at v[n - start].
+    /// Column k: entries W_k^(n) 2^{-e} for n = start..nmax_, at v[n - start].
     struct Column {
         int start = 0;
+        long e = 0;
         Real y = Real(0);
         std::vector<Real> v;
         Real at(int n) const { return (n < start) ? Real(0) : v[n - start]; }
     };
     struct Level {
-        Real T = Real(0);          // sum of weighted terms
+        ScaledReal T;              // S / sigma_k
         ScaledReal sigma;          // sigma_k
         Real xmin = Real(0);       // smallest node of the prefix
-        int N = 0;
+        int N = 0;                 // effective number of terms
         long double error_estimate = 0.0L;
     };
     static constexpr int W_ = 5;
+    static constexpr int kRescaleBits = 400;
+    static constexpr long double kLn2 = 0.693147180559945309417232121458176568L;
 
     Real a_, b_, c_, d_, tol_;
-    int q_max_, nmax_, nmax_ceiling_ = 0, extensions_ = 0;
+    int q_max_, nmax_ = 0, nmax_ceiling_ = 0, extensions_ = 0;
     StackStopping stopping_;
-    std::vector<Real> rho_;                 // rho_[n], n = 1..nmax_+1
-    std::vector<long double> logR_;         // log R_n, n = 0..nmax_+1
+    std::vector<Real> rho_;                 // rho_[n], n = 1..size-1
+    std::vector<long double> logR_;         // log R_n
+    std::vector<long double> tail_cache_;   // log tail beyond nmax_, per k (NaN = unset)
     std::vector<Column> cols_;
     std::vector<Level> levels_;
     long double max_error_estimate_ = 1e-10L;
@@ -252,48 +284,140 @@ private:
             }
             logR_[n] = logR_[n - 1] + std::log(static_cast<long double>(rho_[n]));
         }
+        tail_cache_.assign(q_max_ + 1, std::numeric_limits<long double>::quiet_NaN());
     }
 
-    /// One recurrence step for column k at degree n -> n+1.
-    Real step_(const Column& col, const Column* parent, int k, int n,
-               Real wn, Real wnm1) const {
-        Real v = col.y * wn;
-        if (parent) v += parent->at(n) / (Real(2) * rho_[k]);
-        return Real(2) * rho_[n + 1] * v - rho_[n + 1] * rho_[n] * wnm1;
+    /// log of 2 sum_{n>M} R_n B(n,k) (needs rho_ up to index M+1).  The
+    /// terms decrease at least geometrically from n = M+1 on once their
+    /// ratio bound is < 1; +inf if it is not.
+    long double log_tail_beyond_(int k, int M) const {
+        const long double r = detail::tail_ratio_bound(
+            M + 1, k, static_cast<long double>(rho_[M + 1]));   // rho_{M+2} <= rho_{M+1}
+        if (!(r < 1.0L)) return std::numeric_limits<long double>::infinity();
+        return kLn2 + logR_[M + 1] + detail::log_B(M + 1, k) - std::log1p(-r);
     }
 
-    Column build_column_(int k, Real y) const {
-        Column col;
+    long double tail_beyond_nmax_(int k) {
+        long double& t = tail_cache_[k];
+        if (std::isnan(t)) t = log_tail_beyond_(k, nmax_);
+        return t;
+    }
+
+    static void scale_down_(Real* w, int len, int bits) {
+        for (int i = 0; i < len; ++i) w[i] = std::ldexp(w[i], -bits);
+    }
+
+    /**
+     * Build column k (entries n = k..nmax_; n = 0..nmax_ for k = 0) and
+     * sum it with the active stopping rule.  Returns false if the rule is
+     * not met within nmax_ (caller extends the depth).
+     */
+    bool build_column_(int k, Real y, Column& col, Level& lv) {
         col.y = y;
         const Real* rho = rho_.data();
+        const Real big = std::ldexp(Real(1), kRescaleBits);
+        const Real eps = std::numeric_limits<Real>::epsilon();
+        // Running sums (in units of 2^{col.e}): T = S/sigma_k, A = sum |terms|.
+        Real T = 0, A = 0;
+        int n_eff = std::max(1, k);
+        bool window_done = false;
+        int run = 0, n_window = -1;
+        auto add_term = [&](Real t, int n) {
+            if (window_done) return;
+            T += t; A += std::abs(t);
+            if (std::abs(t) > eps * std::abs(T)) n_eff = n;
+            if (stopping_ == StackStopping::Window && n >= 1) {
+                run = (std::abs(t) < tol_ * std::abs(T)) ? run + 1 : 0;
+                if (n >= k + W_ && run >= W_) { window_done = true; n_window = n; }
+            }
+        };
+
         if (k == 0) {
-            col.start = 0;
+            col.start = 0; col.e = 0;
             col.v.resize(nmax_ + 1);
             Real* w = col.v.data();
             w[0] = Real(2);                                 // W_0^(0)
             w[1] = Real(2) * rho[1] * y;                    // W_0^(1)
+            add_term(w[0], 0);
+            add_term(Real(2) * w[1], 1);
             for (int n = 1; n < nmax_; ++n) {
-                w[n + 1] = Real(2) * rho[n + 1] * (y * w[n])
-                         - rho[n + 1] * rho[n] * w[n - 1];
+                Real v = Real(2) * rho[n + 1] * (y * w[n]) - rho[n + 1] * rho[n] * w[n - 1];
+                if (std::abs(v) > big) {
+                    scale_down_(w, n + 1, kRescaleBits);
+                    v = std::ldexp(v, -kRescaleBits);
+                    T = std::ldexp(T, -kRescaleBits); A = std::ldexp(A, -kRescaleBits);
+                    col.e += kRescaleBits;
+                }
+                w[n + 1] = v;
+                add_term(Real(2) * v, n + 1);
             }
         } else {
             // Column k stores n = k..nmax_; its parent stores n >= k-1,
             // so parent entry n sits at p[n - (k-1)].
-            col.start = k;
+            const Column& par = cols_.back();
+            col.start = k; col.e = par.e;
             col.v.resize(nmax_ - k + 1);
-            Real* w = col.v.data() - k;                     // w[n], n >= k
-            const Real* p = cols_.back().v.data() - (k - 1);
-            const Real s = Real(1) / (Real(2) * rho[k]);   // sigma_{k-1}/sigma_k
-            w[k] = Real(1);                                 // W_k^(k)
+            Real* w0 = col.v.data();
+            Real* w = w0 - k;                               // w[n], n >= k
+            const Real* p = par.v.data() - (k - 1);
+            const Real s0 = Real(1) / (Real(2) * rho[k]);  // sigma_{k-1}/sigma_k
+            Real s = s0;                                    // times 2^{e_par - e_col}
+            w[k] = std::ldexp(Real(1), static_cast<int>(std::max(-100000L, -col.e)));
+            add_term(Real(2) * w[k], k);
             Real wm1 = Real(0);                             // W_k^(k-1)
             for (int n = k; n < nmax_; ++n) {
                 const Real wn = w[n];
-                w[n + 1] = Real(2) * rho[n + 1] * (y * wn + s * p[n])
-                         - rho[n + 1] * rho[n] * wm1;
-                wm1 = wn;
+                Real v = Real(2) * rho[n + 1] * (y * wn + s * p[n])
+                       - rho[n + 1] * rho[n] * wm1;
+                if (std::abs(v) > big) {
+                    scale_down_(w0, n - k + 1, kRescaleBits);
+                    v = std::ldexp(v, -kRescaleBits);
+                    wm1 = std::ldexp(wm1, -kRescaleBits);
+                    T = std::ldexp(T, -kRescaleBits); A = std::ldexp(A, -kRescaleBits);
+                    col.e += kRescaleBits;
+                    s = std::ldexp(s0, static_cast<int>(std::max(-100000L, par.e - col.e)));
+                }
+                w[n + 1] = v;
+                wm1 = w[n];
+                add_term(Real(2) * v, n + 1);
             }
         }
-        return col;
+        if (!std::isfinite(T) || !std::isfinite(A)) {
+            throw std::overflow_error(
+                "IncrementalStack: non-finite term (catastrophic conditioning)");
+        }
+        // Renormalize a column whose entries are all tiny (exact shift).
+        if (A > Real(0) && A < Real(1) / big) {
+            const int sh = -std::ilogb(A);
+            for (Real& v : col.v) v = std::ldexp(v, sh);
+            T = std::ldexp(T, sh); A = std::ldexp(A, sh);
+            col.e -= sh;
+        }
+
+        int N;
+        if (stopping_ == StackStopping::Window) {
+            if (!window_done) return false;
+            N = n_window;
+        } else {
+            N = n_eff;
+        }
+        lv.T.mantissa = T; lv.T.exponent = col.e; lv.T.normalize();
+        lv.N = N;
+        if (T == Real(0)) {
+            lv.error_estimate = std::numeric_limits<long double>::infinity();
+            return true;                    // gated by the caller
+        }
+        if (stopping_ == StackStopping::Certified) {
+            const long double log_S = lv.T.log_abs() + lv.sigma.log_abs();
+            if (!(tail_beyond_nmax_(k) <=
+                  std::log(static_cast<long double>(tol_) / 4.0L) + log_S)) {
+                return false;
+            }
+        }
+        const long double kappa = static_cast<long double>(A) /
+                                  std::abs(static_cast<long double>(T));
+        lv.error_estimate = kappa * static_cast<long double>(eps) * N;
+        return true;
     }
 
     /// Increase the cache depth and extend every stored column.
@@ -301,23 +425,35 @@ private:
         const int old = nmax_;
         compute_rho_(new_nmax);
         nmax_ = new_nmax;
+        const Real big = std::ldexp(Real(1), kRescaleBits);
         for (std::size_t k = 0; k < cols_.size(); ++k) {
             Column& col = cols_[k];
-            const Column* parent = (k == 0) ? nullptr : &cols_[k - 1];
+            const Column* par = (k == 0) ? nullptr : &cols_[k - 1];
             col.v.reserve(nmax_ - col.start + 1);
             for (int n = old; n < nmax_; ++n) {
-                const Real wn   = col.at(n);
-                const Real wnm1 = col.at(n - 1);
-                col.v.push_back(step_(col, parent, static_cast<int>(k), n, wn, wnm1));
+                Real v = col.y * col.at(n);
+                if (par) {
+                    v += std::ldexp(par->at(n), static_cast<int>(std::max(-100000L,
+                             std::min(100000L, par->e - col.e)))) / (Real(2) * rho_[k]);
+                }
+                v = Real(2) * rho_[n + 1] * v - rho_[n + 1] * rho_[n] * col.at(n - 1);
+                if (std::abs(v) > big) {
+                    scale_down_(col.v.data(), static_cast<int>(col.v.size()), kRescaleBits);
+                    v = std::ldexp(v, -kRescaleBits);
+                    col.e += kRescaleBits;
+                }
+                col.v.push_back(v);
             }
         }
         ++extensions_;
     }
 
     long double prefactor_error_estimate_(int q) const {
+        const long double ul = std::numeric_limits<long double>::epsilon();
+        const long double ad = std::abs(static_cast<long double>(d_));
         return static_cast<long double>(std::numeric_limits<Real>::epsilon()) *
-               (std::abs(static_cast<long double>(d_)) +
-                static_cast<long double>(c_) + q + 8.0L);
+               (static_cast<long double>(c_) + q + 8.0L) +
+               4.0L * ul * (1.0L + ad * ul);
     }
 
     static std::string fmt_(long double v) {
@@ -331,98 +467,6 @@ private:
         return levels_.back();
     }
 
-    /// log B(n,k): bound on |T_n[y_0..y_k]| (manuscript Eq. 5.1); B = 1 for k = 0.
-    static long double log_B_(int n, int k) {
-        if (k == 0) return 0.0L;
-        if (n < k) return -std::numeric_limits<long double>::infinity();
-        return (k - 1) * 0.693147180559945309417232121458176568L
-             + std::log(static_cast<long double>(n) / k)
-             + std::lgamma(static_cast<long double>(n + k))
-             - std::lgamma(static_cast<long double>(2 * k))
-             - std::lgamma(static_cast<long double>(n - k + 1));
-    }
-
-    /**
-     * Certified truncation index: smallest N >= max(k, 1) with
-     *     2 sum_{n > N} R_n B(n,k) / S_low <= tol,
-     *     S_low = c^k e^{xmin - d} / (k! I_0(c))   (mean-value lower bound),
-     * i.e. the bound (5.3).  Returns -1 if no N <= nmax_ qualifies (the
-     * tail beyond nmax_ is bounded geometrically).
-     */
-    int certified_N_(int k, Real xmin) const {
-        const long double lc = std::log(static_cast<long double>(c_));
-        const long double log_S_low =
-            k * lc + static_cast<long double>(xmin - d_)
-            - std::lgamma(static_cast<long double>(k + 1))
-            - static_cast<long double>(chebyshev_bessel::log_I0_upper(c_));
-        const long double log_tol = std::log(static_cast<long double>(tol_));
-        // Tail beyond nmax_: terms t_n = R_n B(n,k) with ratio
-        // t_{n+1}/t_n <= c (n+k) / (2 n (n-k+1)) =: r_n, decreasing in n.
-        const int M = nmax_;
-        long double log_tail;
-        {
-            const long double r = static_cast<long double>(c_) * (M + k)
-                                / (2.0L * M * (M - k + 1));
-            if (!(r < 1.0L)) return -1;
-            log_tail = logR_[M] + log_B_(M, k) + std::log(r / (1.0L - r));
-        }
-        auto lse = [](long double p, long double q2) {
-            if (p == -std::numeric_limits<long double>::infinity()) return q2;
-            if (q2 == -std::numeric_limits<long double>::infinity()) return p;
-            const long double m = std::max(p, q2);
-            return m + std::log(std::exp(p - m) + std::exp(q2 - m));
-        };
-        // Walk N downward from M, accumulating the tail; remember the
-        // smallest N for which the bound holds.
-        int best = -1;
-        for (int N = M; N >= std::max(k, 1); --N) {
-            // log_tail currently = log sum_{n > N} t_n
-            if (std::log(2.0L) + log_tail - log_S_low <= log_tol) best = N;
-            else break;                 // bound only grows as N decreases
-            log_tail = lse(log_tail, logR_[N] + log_B_(N, k));
-        }
-        return best;
-    }
-
-    /// Sum the column with the active stopping rule.  Returns false if the
-    /// rule is not met within nmax_ (caller extends the depth).
-    bool sum_column_(const Column& col, int k, Real xmin, Level& lv) const {
-        int N_cert = -1;
-        if (stopping_ == StackStopping::Certified) {
-            N_cert = certified_N_(k, xmin);
-            if (N_cert < 0) return false;
-        }
-        // S / sigma_k = delta_{k0} W^(0) + 2 sum_{n >= 1} W^(n).
-        Real T = (k == 0) ? col.at(0) : Real(0);
-        Real A = std::abs(T);
-        int run = 0, n = std::max(1, k);
-        bool converged = false;
-        for (; n <= nmax_; ++n) {
-            const Real t = Real(2) * col.at(n);
-            T += t;
-            A += std::abs(t);
-            if (!std::isfinite(T) || !std::isfinite(A)) {
-                throw std::overflow_error(
-                    "IncrementalStack: non-finite term (catastrophic conditioning)");
-            }
-            if (stopping_ == StackStopping::Certified) {
-                if (n >= N_cert) { converged = true; break; }
-            } else {
-                run = (std::abs(t) < tol_ * std::abs(T)) ? run + 1 : 0;
-                if (n >= k + W_ && run >= W_) { converged = true; break; }
-            }
-        }
-        if (!converged) return false;
-        lv.T = T;
-        lv.N = n;
-        const long double kappa = (T != Real(0))
-            ? static_cast<long double>(A) / std::abs(static_cast<long double>(T))
-            : std::numeric_limits<long double>::infinity();
-        lv.error_estimate = kappa *
-            static_cast<long double>(std::numeric_limits<Real>::epsilon()) * n;
-        return true;
-    }
-
     /// e^d I_0(c) / c^q in scaled form (same construction as ExpDivDiff).
     ScaledReal prefactor_(int q) const {
         ScaledReal ed, i0, cq, one;
@@ -434,8 +478,10 @@ private:
         const Real e_direct = std::exp(d_);
         if (std::isfinite(e_direct) && e_direct > std::numeric_limits<Real>::min()) {
             ed.mantissa = e_direct; ed.exponent = 0; ed.normalize();
-        } else {
-            ed = from_log(static_cast<long double>(d_));
+        } else {                                // exact reduction, any |d|
+            long double m, err; long k;
+            detail::exp_split(static_cast<long double>(d_), &m, &k, &err);
+            ed.mantissa = static_cast<Real>(m); ed.exponent = k; ed.normalize();
         }
         const Real safe_c = std::log(std::numeric_limits<Real>::max()) - Real(10);
         if (c_ < safe_c) {

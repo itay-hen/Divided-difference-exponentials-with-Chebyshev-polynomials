@@ -2,7 +2,7 @@
 // main.cpp -- CI driver for the Chebyshev exponential divided-difference
 //             reference implementation.
 //
-// Runs eight required test groups plus one informational group, and reports
+// Runs ten required test groups plus one informational group, and reports
 // per-group pass/fail.  Exits non-zero on any *required* failure, so it can
 // serve as the entry point for an automated build.  The informational group
 // is reported separately and does not gate the exit code.
@@ -26,6 +26,11 @@
 //       flow individually.
 //   (9) chebyshev::IncrementalStack: LIFO walks vs batch, q = 800,
 //       refusal of unfavorable insertion orders, rollback on rejection.
+//   (10) Second-audit regressions: Lobatto-type node sets that defeat the
+//       5-term window rule, stack range at q = 600, ratio diagnostics.
+//   (11) Third-audit regressions: all-equal closed form and large common
+//       shifts (accurate e^x in mantissa/exponent form, honest estimate),
+//       and the lowered-interval retry of evaluate().
 //
 // Informational group:
 //   (7) Independent mpmath ground-truth comparison: both methods at matched
@@ -1056,14 +1061,15 @@ bool run_stack_tests() {
                rb <= e.last_error_estimate() && rs <= st.error_estimate() && rb < 1e-12,
                std::max(rb, rs));
     }
-    // S6 (external audit): 50 nodes at +1000, one at -1000 needs N = 506
-    // > default Nmax; the stack must deepen its cache, not fail.
+    // S6 (external audit): 50 nodes at +1000, one at -1000 needs N ~ 500;
+    // started from a shallow cache (Nmax = 120) the stack must deepen it,
+    // not fail.
     {
         std::vector<double> x(51, 1000.0);
         x[50] = -1000.0;
         chebyshev::ExpDivDiff<double> e(-1000.0, 1000.0);
         const auto ref = e.evaluate_scaled(x);
-        chebyshev::IncrementalStack<double> st(-1000.0, 1000.0, 50);
+        chebyshev::IncrementalStack<double> st(-1000.0, 1000.0, 50, 1e-14, 120);
         st.initialize(x);
         const double r = std::abs((st.value_scaled() / ref).to_real() - 1.0);
         report("S6 automatic cache-depth extension", r < 1e-12 && st.depth_extensions() > 0, r);
@@ -1091,10 +1097,207 @@ bool run_stack_tests() {
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+// Group 10: second external audit (stopping rule, stack range, ratio
+// diagnostics).
+// ---------------------------------------------------------------------------
+static bool run_audit2_tests() {
+    std::printf("\n=== Group 10: audit-2 regressions ===\n");
+    int passes = 0, total = 0;
+    auto report = [&](const char* name, bool ok, double v) {
+        ++total; if (ok) ++passes;
+        std::printf("  %-52s %s (%.2e)\n", name, ok ? "OK" : "FAIL", v);
+    };
+    // T1: q = 3, nodes {-10,-5,5,10} on [-10,10]: D_3^(n) = 0 for
+    // n = 4..8; the window rule stopped at n = 8 with a 2.9% error.
+    {
+        const std::vector<double> x = {-10.0, -5.0, 5.0, 10.0};
+        const double ex = 4.0 / 3000.0 * (std::sinh(10.0) - 2.0 * std::sinh(5.0));
+        chebyshev::ExpDivDiff<double> e(-10.0, 10.0);
+        const double rb = std::abs(e.evaluate(x) / ex - 1.0);
+        chebyshev::IncrementalStack<double> st(-10.0, 10.0, 3);
+        st.initialize(x);
+        const double rs = std::abs(st.value() / ex - 1.0);
+        report("T1 Lobatto gap q=3 (batch, stack)", rb < 1e-13 && rs < 1e-13, std::max(rb, rs));
+        e.set_stopping_rule(chebyshev::StoppingRule::Window);
+        const double rw = std::abs(e.evaluate(x) / ex - 1.0);
+        std::printf("      (window rule, for reference: rel. error %.2e)\n", rw);
+    }
+    // T2: Chebyshev--Lobatto node sets y_j = cos(pi j / q) for a range
+    // of q and c, against MNP.
+    {
+        double worst = 0.0; int count = 0;
+        for (double c : {2.0, 10.0, 30.0}) for (int q = 2; q <= 40; ++q) {
+            std::vector<double> x(q + 1);
+            for (int j = 0; j <= q; ++j) x[j] = c * std::cos(M_PI * j / q);
+            chebyshev::ExpDivDiff<double> e(-c, c);
+            double v;
+            try { v = e.evaluate(x); } catch (const std::runtime_error&) { continue; }
+            const double m = mccurdy_templated::ExpDivDiff<double>::compute(x);
+            worst = std::max(worst, std::abs(v - m) / m); ++count;
+            chebyshev::IncrementalStack<double> st(-c, c, q);
+            try { st.initialize(x); } catch (const std::runtime_error&) { continue; }
+            worst = std::max(worst, std::abs(st.value() - m) / m);
+        }
+        report("T2 Chebyshev-Lobatto nodes q<=40 vs MNP", worst < 1e-11 && count > 60, worst);
+    }
+    // T3: stack range: q+1 equal nodes at b on [-4000, 0] (all terms
+    // positive, kappa = 1) used to overflow at q = 319.
+    {
+        chebyshev::IncrementalStack<double> st(-4000.0, 0.0, 600);
+        double worst = 0.0; bool ok = true;
+        try {
+            for (int q = 0; q <= 600; ++q) {
+                st.push(0.0);
+                const long double l = st.value_scaled().log_abs();
+                worst = std::max(worst, (double)std::abs(l + std::lgamma((long double)q + 1)));
+            }
+        } catch (const std::exception&) { ok = false; }
+        report("T3 stack, 601 nodes at b on [-4000,0]", ok && worst < 1e-10, worst);
+    }
+    // T4: alternating 0, -1 on [-4000, 0], against the batch evaluator.
+    {
+        chebyshev::IncrementalStack<double> st(-4000.0, 0.0, 500);
+        chebyshev::ExpDivDiff<double> e(-4000.0, 0.0);
+        std::vector<double> x;
+        double worst = 0.0; bool ok = true;
+        try {
+            for (int q = 0; q <= 500; ++q) {
+                const double v = (q % 2) ? -1.0 : 0.0;
+                st.push(v); x.push_back(v);
+                if (q % 50 == 0 && q > 0) {
+                    const double r = std::abs((st.value_scaled() / e.evaluate_scaled(x)).to_real() - 1.0);
+                    worst = std::max(worst, r);
+                }
+            }
+        } catch (const std::exception&) { ok = false; }
+        report("T4 stack, alternating 0/-1 on [-4000,0], q<=500", ok && worst < 1e-11, worst);
+    }
+    // T5: depth extension with rescaled columns.
+    {
+        chebyshev::IncrementalStack<double> st(-4000.0, 0.0, 400, 1e-14, 420);
+        std::vector<double> x;
+        double worst = 0.0; bool ok = true;
+        try {
+            for (int q = 0; q <= 400; ++q) { const double v = (q % 3) ? -2.0 : 0.0; st.push(v); x.push_back(v); }
+            chebyshev::ExpDivDiff<double> e(-4000.0, 0.0);
+            worst = std::abs((st.value_scaled() / e.evaluate_scaled(x)).to_real() - 1.0);
+        } catch (const std::exception&) { ok = false; }
+        report("T5 depth extension with rescaled columns", ok && worst < 1e-11 && st.depth_extensions() > 0, worst);
+    }
+    // T6: ratio diagnostics combine both evaluations.
+    {
+        const std::vector<double> x = {-10.0, -5.0, 5.0, 10.0};
+        const double ex = 4.0 / 3000.0 * (std::sinh(10.0) - 2.0 * std::sinh(5.0)) * 6.0;
+        chebyshev::ExpDivDiff<double> e(-10.0, 10.0);
+        const double r = e.evaluate_ratio(x, {0.0, 0.0, 0.0, 0.0});
+        e.evaluate_normalized_scaled(x);
+        const long double en = e.last_error_estimate();
+        const double re = std::abs(r / ex - 1.0);
+        e.evaluate_ratio(x, {0.0, 0.0, 0.0, 0.0});
+        report("T6 ratio value and combined indicator", re < 1e-13 && e.last_error_estimate() >= en && en > 0, re);
+    }
+    std::printf("  %d/%d audit-2 tests passed\n", passes, total);
+    const bool ok = (passes == total);
+    std::printf("=== %s ===\n", ok ? "Group 10 PASS" : "Group 10 FAIL");
+    return ok;
+}
+
+// Group 11: regressions for the third independent audit (2026-11-14).
+// The all-equal closed form e^x / q! used to be converted to
+// mantissa/exponent form via exp2(frac(x / ln2)), losing ~|x| u_ld in
+// the exponent's fractional part (2.5e-10 at x = 1e10 with x87 long
+// double, ~1e-6 with 53-bit long double) while reporting a zero error
+// estimate.  The same conversion formed e^d for large midpoints d.
+// References: mpmath, 80 digits.
+static bool run_audit3_tests() {
+    std::printf("\n=== Group 11: audit-3 regressions ===\n");
+    int passes = 0, total = 0;
+    auto report = [&](const char* name, bool ok, double v) {
+        ++total; if (ok) ++passes;
+        std::printf("  %-52s %s (%.2e)\n", name, ok ? "OK" : "FAIL", v);
+    };
+    using SR = chebyshev::ExpDivDiff<double>::ScaledReal;
+    auto rel = [](const SR& v, long double m_ref, long e_ref) {
+        return static_cast<double>(std::abs(
+            std::ldexp(static_cast<long double>(v.mantissa), static_cast<int>(v.exponent - e_ref)) / m_ref - 1.0L));
+    };
+    // U1-U3: all-equal closed form, value and a nonzero, small estimate.
+    struct Case { double x; int q; long double m; long e; const char* name; };
+    const Case cases[] = {
+        {1e10, 3, 0.6175687140712587953L, 14426950407L, "U1 all-equal x=1e10, q=3"},
+        {1e12, 3, 0.64996992044245039104L, 1442695040887L, "U2 all-equal x=1e12, q=3"},
+        {0.0, 200000, 0.86018657913844821649L, -3233399L, "U3 all-equal x=0, q=200000"},
+    };
+    for (const Case& cs : cases) {
+        bool ok = true; double r = 1.0;
+        try {
+            chebyshev::ExpDivDiff<double> e(cs.x - 1.0, cs.x + 1.0);
+            const SR v = e.evaluate_scaled(std::vector<double>(cs.q + 1, cs.x));
+            r = rel(v, cs.m, cs.e);
+            const long double est = e.last_error_estimate();
+            ok = r < 1e-14 && est > 0.0L && est < 1e-13L && r <= est;
+        } catch (const std::exception&) { ok = false; }
+        report(cs.name, ok, r);
+    }
+    // U4: the closed form enforces the threshold like the other branches.
+    {
+        chebyshev::ExpDivDiff<double> e(-1.0, 1.0);
+        e.set_max_error_estimate(1e-17L);
+        bool threw = false;
+        try { e.evaluate_scaled({0.5, 0.5, 0.5}); } catch (const std::runtime_error&) { threw = true; }
+        report("U4 all-equal honours set_max_error_estimate", threw, 0.0);
+    }
+    // U5: general nodes at a large common shift (e^d via exact reduction),
+    // batch and stack; formerly refused (estimate u |d| = 2e-4).
+    {
+        const double x = 1e12;
+        const std::vector<double> v = {x, x + 0.5, x + 1.0, x + 2.0};
+        double worst = 1.0; bool ok = true;
+        try {
+            chebyshev::ExpDivDiff<double> e(x, x + 2.0);
+            const double rb = rel(e.evaluate_scaled(v), 0.82489976592720517611L, 1442695040888L);
+            chebyshev::IncrementalStack<double> st(x, x + 2.0, 8);
+            st.initialize(v);
+            const double rs = rel(st.value_scaled(), 0.82489976592720517611L, 1442695040888L);
+            worst = std::max(rb, rs);
+            ok = worst < 1e-14 && e.last_error_estimate() < 1e-13L;
+        } catch (const std::exception&) { ok = false; }
+        report("U5 shifted nodes x=1e12 (batch, stack)", ok, worst);
+    }
+    // U6: lowered-interval retry (Sec. 4.2).  A PMR-like multiset: 121
+    // nodes on seven levels, five at the top and the bulk 64..128 below.
+    // On the tight interval [-128, 0] the indicator is ~8e2 (the midpoint
+    // lies above the bulk); evaluate() must retry on [min - w, max] and
+    // return the value to ~1e-12.  Reference: mpmath, residues, 400 digits.
+    {
+        std::vector<double> x;
+        const int lev[] = {0, -48, -64, -80, -96, -112, -128};
+        const int mul[] = {5, 10, 20, 30, 30, 20, 6};
+        for (int i = 0; i < 7; ++i) for (int k = 0; k < mul[i]; ++k) x.push_back(lev[i]);
+        bool ok = true; double r = 1.0;
+        try {
+            chebyshev::ExpDivDiff<double> e(-128.0, 0.0);
+            r = rel(e.evaluate_scaled(x), 0.5252697781776360207047L, -774L);
+            ok = r < 1e-12 && e.last_error_estimate() < 1e-10L;
+            chebyshev::ExpDivDiff<double> e0(-128.0, 0.0);
+            e0.set_lowered_retry(false);
+            bool threw = false;
+            try { e0.evaluate_scaled(x); } catch (const std::runtime_error&) { threw = true; }
+            ok = ok && threw;
+        } catch (const std::exception&) { ok = false; }
+        report("U6 lowered-interval retry, PMR-like set q=120", ok, r);
+    }
+    std::printf("  %d/%d audit-3 tests passed\n", passes, total);
+    const bool ok = (passes == total);
+    std::printf("=== %s ===\n", ok ? "Group 11 PASS" : "Group 11 FAIL");
+    return ok;
+}
+
 int main() {
     std::printf("\n");
     std::printf("=========================================================\n");
-    std::printf(" Chebyshev exp-divdiff CI: 8 required groups + 1 informational\n");
+    std::printf(" Chebyshev exp-divdiff CI: 10 required groups + 1 informational\n");
     std::printf("=========================================================\n");
 
     int required_total = 0, required_passed = 0;
@@ -1108,6 +1311,8 @@ int main() {
     record_required(run_a2_a4_features_test()); std::fflush(stdout);
     record_required(run_revision_tests()); std::fflush(stdout);
     record_required(run_stack_tests()); std::fflush(stdout);
+    record_required(run_audit2_tests()); std::fflush(stdout);
+    record_required(run_audit3_tests()); std::fflush(stdout);
     run_mpmath_reference_test();
     // Group 7 is informational only; it does not gate exit status.
 
