@@ -104,8 +104,10 @@ def load(data):
                 o["interval"] = "-"
             elif o["prod_key"] == o["ab_key"]:
                 o["interval"] = "tight(prescreen)" if c > 100 * spread[i] else "[a,b]"
-            else:
+            elif o["prod_key"] == o["tight_key"]:
                 o["interval"] = "tight(retry)"
+            else:
+                o["interval"] = "lowered(retry)"   # [min x - s w, max x], s = 1, 2
             m = float(r["mnp"])
             if not np.isfinite(m) or m == 0.0:
                 o["mnp_status"], o["mnp_err"] = "underflow", float("nan")

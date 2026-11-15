@@ -26,9 +26,12 @@ done
 "$BUILD/e5_interval_sensitivity" "$DATA"
 "$BUILD/e6_stack_micro"          "$DATA"
 "$BUILD/e6_qmc_chain"            "$DATA" 100000 20000 2> "$DATA/e6_qmc_failures.log"
-# Legacy IncrementalExpDivDiff comparisons (optional):
-"$BUILD/e6_incremental_micro"    "$DATA"
-"$BUILD/e6_incremental_order"    "$DATA"
-"$BUILD/e6_qmc_chain_legacy"     "$DATA" 100000 20000 2> "$DATA/e6_qmc_failures_legacy.log"
+# Legacy IncrementalExpDivDiff comparisons (optional; SKIP_LEGACY=1 skips
+# them -- the legacy header is unchanged, so earlier CSVs remain valid):
+if [ "${SKIP_LEGACY:-0}" != "1" ]; then
+  "$BUILD/e6_incremental_micro"    "$DATA"
+  "$BUILD/e6_incremental_order"    "$DATA"
+  "$BUILD/e6_qmc_chain_legacy"     "$DATA" 100000 20000 2> "$DATA/e6_qmc_failures_legacy.log"
+fi
 python3 -I "$HERE/make_reference.py" "$DATA"
 python3 -I "$HERE/make_figures.py"   "$DATA" "$FIGS"

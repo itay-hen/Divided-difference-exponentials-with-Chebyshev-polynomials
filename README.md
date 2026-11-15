@@ -11,18 +11,27 @@ platforms whose standard library lacks it, e.g. Apple libc++).
 
 ## What it is good for — and what not
 
+* **Batch evaluation.** O(qN) per evaluation. On operation traces recorded
+  from a permutation-matrix-representation QMC code (PMR-QMC), batch
+  evaluation was 1.7–36× faster than the incremental routine that code uses
+  (`experiments/pmr_traces`).
 * **Incremental updates.** With a fixed interval, appending a node costs
   Θ(N_max − q) and removing the most recently appended node costs O(1)
-  (`chebyshev_stack.hpp`). In our measurements an append takes 0.15–0.35 µs,
-  up to ~10³× less than a full recomputation (q = 800). This is the update
-  pattern of permutation-matrix-representation quantum Monte Carlo.
+  (`chebyshev_stack.hpp`). For last-in-first-out updates an append takes
+  0.2–0.6 µs, up to ~10³× less than a full recomputation (q = 800). Interior
+  removals cost a rebuild of the columns above them; on the PMR-QMC traces,
+  which remove interior nodes and need large nodes first, the stack was
+  slower than batch evaluation.
 * **Accuracy.** Near working precision when q ≫ c, when q ≲ 10, or when
   c ≲ 30 (c = half-width of the interval), including clustered, repeated and
   nearly coincident nodes. The series is **ill-conditioned** when q and c are
-  both large with q ≲ c, and when the nodes lie far below the upper end b of
-  the interval. The code computes an error indicator κ·u·N and **raises an
-  exception instead of returning an inaccurate value**; use MNP
-  (`mccurdy.hpp`) or higher precision there.
+  both large with q ≲ c, when the upper end b lies above the nodes, and,
+  for q ≳ c, when the nodes lie mostly below the midpoint of the interval.
+  `evaluate()` retries on [min x, max x] and then on [min x − s·w, max x],
+  s = 1, 2 (w = max x − min x), which puts the midpoint at the smallest node
+  and removes the last mechanism. The code computes an error indicator κ·u·N
+  and **raises an exception instead of returning an inaccurate value**; use
+  MNP (`mccurdy.hpp`) or higher precision there.
 * **Range.** All intermediate quantities are scaled; any order works (tested
   to q = 3000). Values outside double range are returned in mantissa/exponent
   form; ratios of same-order values on the same interval are formed directly.
@@ -63,9 +72,10 @@ costs extra terms; raising b above the nodes costs accuracy ~ e^{b − max xᵢ}
 | `chebyshev_stack.hpp` | Incremental evaluator (weighted contiguous columns, per-prefix gating) |
 | `mccurdy.hpp` | McCurdy–Ng–Parlett baseline (entry-wise Taylor convergence, divided-difference squaring) |
 | `incremental_chebyshev_exp_divdiff.hpp` | Legacy incremental class, superseded by `chebyshev_stack.hpp`; kept for older tests |
-| `main.cpp` + `test_*.hpp` | Test driver: 8 required groups + 1 informational (mpmath) group |
+| `main.cpp` + `test_*.hpp` | Test driver: 10 required groups + 1 informational (mpmath) group |
 | `mpmath_reference.py`, `cases.csv`, `reference.csv` | High-precision reference values for the informational group |
-| `experiments/` | Drivers and plotting scripts for every figure and table of the paper |
+| `experiments/` | Drivers and plotting scripts for every figure and table of the paper; `experiments/run_v20.sh` regenerates all of them |
+| `experiments/pmr_traces/` | PMR-QMC operation traces: recorder, replay, exact-value check |
 | `CODE_CHANGES.md` | Detailed change log |
 
 ## Build and test

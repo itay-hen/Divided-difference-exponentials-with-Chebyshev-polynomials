@@ -14,8 +14,13 @@
 // Accuracy: both values are compared with the batch evaluator through
 // log values (GBH returns n! exp[z_0..z_n] in its own extended format).
 //
+// Both Chebyshev evaluators use their default (certified) stopping rule.
+// Appends the stack refuses (error indicator above threshold) are counted
+// (refused_frac); a refused push costs the same column build.
+//
 // Output CSV on stdout: c,q,s_gbh,nmax,t_stack_ns,t_gbh_tuned_ns,
-//                       t_gbh_default_ns,t_batch_ns,dlog_stack,dlog_gbh
+//                       t_gbh_default_ns,t_batch_ns,dlog_stack,dlog_gbh,
+//                       refused_frac
 //
 // Build: g++ -std=c++17 -O3 -march=native -I../.. -I/opt/homebrew/include gbh_vs_stack.cpp
 #include "chebyshev_stack.hpp"
@@ -70,7 +75,7 @@ double time_gbh(const std::vector<double>& base, const std::vector<double>& extr
 
 int main() {
     std::printf("c,q,s_gbh,nmax,t_stack_ns,t_gbh_tuned_ns,t_gbh_default_ns,"
-                "t_batch_ns,dlog_stack,dlog_gbh\n");
+                "t_batch_ns,dlog_stack,dlog_gbh,refused_frac\n");
     std::mt19937 rng(2026);
     for (double c : {5.0, 50.0}) {
         for (int q : {10, 50, 100, 200, 400, 800}) {
@@ -90,13 +95,17 @@ int main() {
             // Stack.
             chebyshev::IncrementalStack<double> st(-c, c, q + 10);
             st.initialize(base);
-            st.push(extra[0]);
-            const long double dlog_stack = st.value_scaled().log_abs() - ref_log;
-            st.pop();
+            long double dlog_stack = NAN;
+            try {
+                st.push(extra[0]);
+                dlog_stack = st.value_scaled().log_abs() - ref_log;
+                st.pop();
+            } catch (const std::runtime_error&) {}
             volatile double sink = 0;
+            int refused = 0;
             double t0 = now_ns();
             for (int r = 0; r < reps; ++r) {
-                st.push(extra[r]);
+                try { st.push(extra[r]); } catch (const std::runtime_error&) { ++refused; continue; }
                 sink += st.normalized_scaled().mantissa;
                 st.pop();
             }
@@ -107,7 +116,8 @@ int main() {
             t0 = now_ns();
             for (int r = 0; r < breps; ++r) {
                 full.back() = extra[r % reps];
-                sink += E.evaluate_normalized_scaled(full).mantissa;
+                try { sink += E.evaluate_normalized_scaled(full).mantissa; }
+                catch (const std::runtime_error&) {}
             }
             const double t_batch = (now_ns() - t0) / breps;
 
@@ -118,9 +128,9 @@ int main() {
             const double t_gbh_default = time_gbh(base, extra_d, 10001, &dlog_tmp, ref_log);
             const int s_gbh = static_cast<int>(std::ceil(2.0 * c / 3.5));
 
-            std::printf("%g,%d,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2Le,%.2Le\n", c, q, s_gbh,
+            std::printf("%g,%d,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2Le,%.2Le,%.4f\n", c, q, s_gbh,
                         st.nmax(), t_stack, t_gbh_tuned, t_gbh_default, t_batch,
-                        dlog_stack, dlog_gbh);
+                        dlog_stack, dlog_gbh, double(refused) / reps);
             std::fflush(stdout);
         }
     }
