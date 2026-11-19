@@ -2082,3 +2082,30 @@ accepted, max error 1.8e-13 against exact values.
   whose change is at the rounding level; they were not re-run.
 
 Status: 10/10 required groups (Group 11: 7/7); clean under ASan+UBSan.
+
+## Round 6: material restored from the arXiv version (2026-11-19)
+
+Three items of arXiv:2512.23061 (v1) that were dropped in v18 are back,
+in corrected form:
+
+- Lambert-W estimate of N (paper Eq. 5.7).  The arXiv estimate
+  N ~ max{q, 2q/W(4q/c)} + sqrt(2q ln(1/eps)) overestimates N - q by up
+  to 20x against the code (e.g. q = 500, c = 0.1: 180 vs 9).  From the
+  stopping test, for q >~ 3c: N - q ~ L/W(L/(ec)), L = ln(4/eps),
+  independent of q; it gives 9, 18, 52 for c = 0.1, 1, 10 against
+  medians 9, 17, 49 at q = 500.  `scaling/plot_scaling.py` draws it as
+  dashed lines in Fig. 5.1(b) (needs scipy).
+- R_n(c) figure: `scaling/plot_Rn.py` -> figs_v20/fig_Rn.pdf (SM9);
+  scipy ive ratios, spot-checked against mpmath (1.5e-13).
+- Ratios vs MNP: `accuracy/e7_ratio.cpp` (20 pairs per (q, c) cell,
+  x' = x with one node replaced, interval [-c, c], evaluate_ratio vs MNP
+  in double), exact references by `accuracy/mp_reference.py` (~2.5 min
+  on 12 cores), `accuracy/e7_analyze.py` -> figs_v20/fig_ratio_heatmap.pdf
+  and Data/v20/e7_ratio_summary.csv (SM10).  Results: 1218/1620 ratios
+  accepted, max error 4.3e-13, error/indicator <= 0.15; refusals only
+  for q <~ c, c >= 10.  MNP failed on 444 (underflow q >= 200, overflow
+  c = 1000); where finite, median error <= 6.2e-14 except q = 200,
+  c = 1000 (3.5e-7).  926 pairs both, 292 only Chebyshev, 250 only MNP,
+  152 neither (75 of those recovered by evaluate() on each set
+  separately, errors <= 4.0e-13).
+- All three are in run_v20.sh.  No library code changed.

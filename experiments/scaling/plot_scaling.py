@@ -9,6 +9,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.special import lambertw
 
 src, dst = sys.argv[1], sys.argv[2]
 plt.rcParams.update({"font.family": "serif", "mathtext.fontset": "cm",
@@ -36,6 +37,11 @@ show_c = [0.1, 1, 10, 100, 1000]
 for i, c in enumerate(show_c):
     col = plt.get_cmap("plasma")(i / len(show_c))
     ax[1].plot(qs, [med(q, c, "N") - q for q in qs], "s-", ms=3, lw=1, color=col, label=f"$c={c:g}$")
+    # order-dominated estimate N - q ~ L4/W(L4/(e c)), L4 = ln(4/eps), drawn for q >= 3c
+    L4 = math.log(4e14); m = L4 / lambertw(L4 / (math.e * c)).real
+    qq = [q for q in qs if q >= 3 * c]
+    if qq:
+        ax[1].plot([qq[0], qq[-1]], [m, m], "--", lw=0.8, color=col)
 ax[1].set_xscale("log"); ax[1].set_yscale("log")
 ax[1].set_xlabel("order $q$"); ax[1].set_ylabel("$N-q$")
 ax[1].legend(frameon=False, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.28), handlelength=1.5, columnspacing=0.8)
