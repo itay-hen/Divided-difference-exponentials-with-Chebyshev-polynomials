@@ -98,6 +98,7 @@ public:
         if (!(tol > Real(0))) throw std::invalid_argument("IncrementalStack: tol <= 0");
         c_ = b / 2 - a / 2;
         d_ = b / 2 + a / 2;
+        c_ = detail::fit_halfwidth(a, b, d_, c_);   // mapped nodes in [-1, 1]
         const double L = std::log(1.0 / static_cast<double>(tol));
         const int guess = q_max + static_cast<int>(std::ceil(
                               1.3 * std::sqrt(2.0 * static_cast<double>(c_) * L))) + 30;

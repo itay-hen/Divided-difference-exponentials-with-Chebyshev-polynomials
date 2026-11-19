@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerate every data set and figure of the manuscript (version 20).
-# Total ~50 min single-threaded on an Apple M3 Max.
+# Total ~55 min (mostly single-threaded) on an Apple M3 Max.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE/.."
@@ -18,11 +18,18 @@ if [ "${RESUME_FROM:-}" = "" ]; then
 echo "== scaling"; cxx "$HERE/scaling/n_kappa_sweep.cpp" -o "$HERE/bin/n_kappa_sweep"
 for m in fixed tight pinned; do "$HERE/bin/n_kappa_sweep" "$DATA/n_kappa_sweep_$m.csv" $m; done
 python3 -I "$HERE/scaling/plot_scaling.py" "$DATA/n_kappa_sweep_pinned.csv" "$FIGS/fig_scaling.pdf"
+python3 -I "$HERE/scaling/plot_Rn.py" "$FIGS/fig_Rn.pdf"
 
 echo "== stopping rule (E4)"; cxx "$HERE/accuracy/e4_stopping_rule.cpp" -o "$HERE/bin/e4_stopping_rule"
 "$HERE/bin/e4_stopping_rule" > "$DATA/e4_stopping_rule.csv"
 
 echo "== accuracy"; bash "$HERE/accuracy/run_all.sh"
+
+echo "== ratios vs MNP (E7)"; cxx "$HERE/accuracy/e7_ratio.cpp" -o "$HERE/bin/e7_ratio"
+"$HERE/bin/e7_ratio" "$DATA/e7_ratio" 20
+python3 -I "$HERE/accuracy/mp_reference.py" --nodes "$DATA/e7_ratio_nodes.csv" --out "$DATA/e7_ratio_ref.csv" --jobs 12
+python3 -I "$HERE/accuracy/e7_analyze.py" "$DATA/e7_ratio_results.csv" "$DATA/e7_ratio_ref.csv" \
+  "$FIGS/fig_ratio_heatmap.pdf" "$DATA/e7_ratio_summary.csv"
 fi
 if [ "${RESUME_FROM:-}" = "e3" ]; then
   echo "== truncation (resume)"

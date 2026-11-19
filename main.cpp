@@ -30,7 +30,8 @@
 //       5-term window rule, stack range at q = 600, ratio diagnostics.
 //   (11) Third-audit regressions: all-equal closed form and large common
 //       shifts (accurate e^x in mantissa/exponent form, honest estimate),
-//       and the lowered-interval retry of evaluate().
+//       the lowered-interval retry of evaluate(), and the rounded-midpoint
+//       half-width fix.
 //
 // Informational group:
 //   (7) Independent mpmath ground-truth comparison: both methods at matched
@@ -1287,6 +1288,35 @@ static bool run_audit3_tests() {
             ok = ok && threw;
         } catch (const std::exception&) { ok = false; }
         report("U6 lowered-interval retry, PMR-like set q=120", ok, r);
+    }
+    // U7: rounded midpoint (fourth audit).  On [2^51 + 0.5, 2^51 + 2] the
+    // rounded midpoint is d = 2^51 + 1 and (b - a)/2 = 0.75, so b mapped
+    // to y = 4/3, outside the domain of the tail bound.  The half-width is
+    // now widened until both endpoints map into [-1, 1].  References:
+    // mpmath, 60 digits.  Also: 2000 random intervals at large offsets.
+    {
+        const double D = std::ldexp(1.0, 51), a = D + 0.5, b = D + 2.0;
+        bool ok = true; double worst = 0.0;
+        try {
+            chebyshev::IncrementalStack<double> st(a, b, 8);
+            ok = ok && (b - st.d()) / st.c() <= 1.0 && (a - st.d()) / st.c() >= -1.0;
+            st.push(b);
+            worst = std::max(worst, rel(st.value_scaled(), 0.953447947520754456L, 3248660424278402L));
+            for (int k = 0; k < 3; ++k) st.push(b);
+            worst = std::max(worst, rel(st.value_scaled(), 0.635631965013836304L, 3248660424278400L));
+            chebyshev::ExpDivDiff<double> e(a, b);
+            worst = std::max(worst, rel(e.evaluate_scaled({b, b - 1.0, a}), 0.871125972287382222L, 3248660424278400L));
+            std::mt19937_64 g(11);
+            for (int t = 0; t < 2000; ++t) {
+                const double off = std::ldexp(1.0, 30 + static_cast<int>(g() % 21));  // quarter steps representable
+                const double lo = off + static_cast<double>(g() % 1000) * 0.25;
+                const double hi = lo + 0.25 * static_cast<double>(1 + g() % 64);
+                chebyshev::IncrementalStack<double> s2(lo, hi, 4);
+                if (!((hi - s2.d()) / s2.c() <= 1.0 && (lo - s2.d()) / s2.c() >= -1.0)) ok = false;
+            }
+            ok = ok && worst < 1e-14;
+        } catch (const std::exception&) { ok = false; }
+        report("U7 rounded midpoint: nodes map into [-1,1]", ok, worst);
     }
     std::printf("  %d/%d audit-3 tests passed\n", passes, total);
     const bool ok = (passes == total);

@@ -2011,7 +2011,9 @@ All data and figures regenerated in Data and figures/v19 and tex/figs_v19.
 
 Status: 10/10 required groups (Group 11: 5/5); clean under ASan+UBSan.
 No experiment data changes: the value changes affect only all-equal
-inputs and |d| > ~709, which no experiment uses; dropping u|d| from the
+inputs and |d| > ~709 [correction, round 5: all-equal inputs DO occur --
+the toy chain visits q = 0 states (20,866 of 100,000 at L = 8, beta = 1);
+the v20 run of 2026-11-15, made after this fix, already includes them]; dropping u|d| from the
 prefactor estimate changes it by <= 2e-14 (|d| <= 100 in all experiments),
 and no accuracy case is within 1% of the 1e-10 threshold.
 
@@ -2053,3 +2055,57 @@ Status (v20): 10/10 required groups (Group 11: 6/6); clean under ASan+UBSan.
 Accuracy study: 525 refusals of 10206 (was 1806), max accepted error
 2.1e-13, max error/indicator 0.17.  PMR traces: 1399/1400 sampled reads
 accepted, max error 1.8e-13 against exact values.
+
+
+## Round 5: rounded midpoint (fourth audit, 2026-11-19)
+
+- **Mapped nodes outside [-1, 1].**  c = b/2 - a/2 and d = b/2 + a/2 are
+  rounded; on [2^51 + 0.5, 2^51 + 2] this gave d = 2^51 + 1, c = 0.75 and
+  y(b) = 4/3, outside the domain of the tail bound (the auditor measured
+  5.7e-12 error with an indicator of 4.6e-15 for a single pushed node; on
+  arm64 the error happened to stay at 1e-16).  New
+  `detail::fit_halfwidth`: c is enlarged (max with b - d, d - a, then
+  nextafter) until fl(fl(b - d)/c) <= 1 and fl(fl(a - d)/c) >= -1; by
+  monotone rounding every node in [a, b] then maps into [-1, 1].  Applied
+  in ExpDivDiff, IncrementalStack and the legacy class.  Exact: the series
+  then represents e^x on [d - c, d + c], which contains [a, b].
+- Test U7 (Group 11): the auditor's case against mpmath (single node,
+  four equal nodes, batch three nodes; errors <= 4.4e-16) and 2000 random
+  intervals at offsets 2^30..2^50.
+- Effect on the experiments: c changes by at most a few ulps, only where
+  (a + b)/2 is inexact.  The accuracy study was re-run (same nodes and
+  references): refusals 525 and maximum accepted error 2.085e-13
+  unchanged; only the nearly-coincident row of Table 6.1 moves at the
+  rounding level; max error/indicator 0.154 (was 0.166).  Its CSVs and
+  figures were replaced.  Other experiments use intervals with exact
+  midpoints (symmetric [-c, c], integer PMR levels) or tight intervals
+  whose change is at the rounding level; they were not re-run.
+
+Status: 10/10 required groups (Group 11: 7/7); clean under ASan+UBSan.
+
+## Round 6: material restored from the arXiv version (2026-11-19)
+
+Three items of arXiv:2512.23061 (v1) that were dropped in v18 are back,
+in corrected form:
+
+- Lambert-W estimate of N (paper Eq. 5.7).  The arXiv estimate
+  N ~ max{q, 2q/W(4q/c)} + sqrt(2q ln(1/eps)) overestimates N - q by up
+  to 20x against the code (e.g. q = 500, c = 0.1: 180 vs 9).  From the
+  stopping test, for q >~ 3c: N - q ~ L/W(L/(ec)), L = ln(4/eps),
+  independent of q; it gives 9, 18, 52 for c = 0.1, 1, 10 against
+  medians 9, 17, 49 at q = 500.  `scaling/plot_scaling.py` draws it as
+  dashed lines in Fig. 5.1(b) (needs scipy).
+- R_n(c) figure: `scaling/plot_Rn.py` -> figs_v20/fig_Rn.pdf (SM9);
+  scipy ive ratios, spot-checked against mpmath (1.5e-13).
+- Ratios vs MNP: `accuracy/e7_ratio.cpp` (20 pairs per (q, c) cell,
+  x' = x with one node replaced, interval [-c, c], evaluate_ratio vs MNP
+  in double), exact references by `accuracy/mp_reference.py` (~2.5 min
+  on 12 cores), `accuracy/e7_analyze.py` -> figs_v20/fig_ratio_heatmap.pdf
+  and Data/v20/e7_ratio_summary.csv (SM10).  Results: 1218/1620 ratios
+  accepted, max error 4.3e-13, error/indicator <= 0.15; refusals only
+  for q <~ c, c >= 10.  MNP failed on 444 (underflow q >= 200, overflow
+  c = 1000); where finite, median error <= 6.2e-14 except q = 200,
+  c = 1000 (3.5e-7).  926 pairs both, 292 only Chebyshev, 250 only MNP,
+  152 neither (75 of those recovered by evaluate() on each set
+  separately, errors <= 4.0e-13).
+- All three are in run_v20.sh.  No library code changed.

@@ -900,6 +900,13 @@ public:
         // constructor for the same fix).
         c_ = b / traits::two() - a / traits::two();
         d_ = b / traits::two() + a / traits::two();
+        // Widen c so that the rounded midpoint still maps [a, b] into
+        // [-1, 1] (see detail::fit_halfwidth in chebyshev_exp_divdiff.hpp).
+        if (std::isfinite(static_cast<long double>(c_)) && std::isfinite(static_cast<long double>(d_))) {
+            c_ = std::max(c_, std::max(b - d_, d_ - a));
+            for (int i = 0; i < 64 && !((b - d_) / c_ <= T(1) && (a - d_) / c_ >= T(-1)); ++i)
+                c_ = std::nextafter(c_, std::numeric_limits<T>::infinity());
+        }
         if (!std::isfinite(static_cast<long double>(c_)) ||
             !std::isfinite(static_cast<long double>(d_))) {
             throw std::invalid_argument(
