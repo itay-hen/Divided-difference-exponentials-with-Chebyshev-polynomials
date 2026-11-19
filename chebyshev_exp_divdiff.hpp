@@ -81,6 +81,25 @@ inline long double tail_ratio_bound(int m0, int k, long double rho_up) {
 /// (relative error ~2e-10 at x = 1e10 with x87, ~1e-6 with 53 bits).
 /// *err_out receives a bound on the relative error of m * 2^k from the
 /// reduction and exp (not counting the final rounding of m to Real).
+/// Half-width c' >= c such that the mapped endpoints satisfy
+/// fl(fl(a - d) / c') >= -1 and fl(fl(b - d) / c') <= 1 in Real
+/// arithmetic, where d is the rounded midpoint.  Rounding of d (and of c)
+/// can otherwise put mapped nodes outside [-1, 1] -- e.g. [2^51 + 0.5,
+/// 2^51 + 2] gives d = 2^51 + 1, c = 0.75, y(b) = 4/3 -- which voids the
+/// hypotheses of the tail bound (5.3)-(5.4) and of the expansion's
+/// normalization.  Since rounding is monotone, every node in [a, b] then
+/// maps into [-1, 1].  Using c' in place of (b - a)/2 is exact: the series
+/// represents e^x on [d - c', d + c'], which contains [a, b].
+template <typename Real>
+inline Real fit_halfwidth(Real a, Real b, Real d, Real c) {
+    c = std::max(c, std::max(b - d, d - a));
+    for (int i = 0; i < 64; ++i) {
+        if ((b - d) / c <= Real(1) && (a - d) / c >= Real(-1)) return c;
+        c = std::nextafter(c, std::numeric_limits<Real>::infinity());
+    }
+    throw std::runtime_error("fit_halfwidth: cannot cover [a, b]");
+}
+
 inline void exp_split(long double x, long double* m_out, long* k_out,
                       long double* err_out) {
     // ln2 = A + B + C to ~1e-49 (A, B, C doubles, exact in long double).
@@ -179,6 +198,10 @@ public:
         // mapping or the I_0(c) cache.
         c_ = b / traits::two() - a / traits::two();
         d_ = b / traits::two() + a / traits::two();
+        if (std::isfinite(static_cast<long double>(c_)) &&
+            std::isfinite(static_cast<long double>(d_))) {
+            c_ = detail::fit_halfwidth(a, b, d_, c_);   // mapped nodes in [-1, 1]
+        }
         if (!std::isfinite(static_cast<long double>(c_)) ||
             !std::isfinite(static_cast<long double>(d_))) {
             throw std::invalid_argument(

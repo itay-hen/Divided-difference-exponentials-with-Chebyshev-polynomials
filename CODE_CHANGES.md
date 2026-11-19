@@ -2011,7 +2011,9 @@ All data and figures regenerated in Data and figures/v19 and tex/figs_v19.
 
 Status: 10/10 required groups (Group 11: 5/5); clean under ASan+UBSan.
 No experiment data changes: the value changes affect only all-equal
-inputs and |d| > ~709, which no experiment uses; dropping u|d| from the
+inputs and |d| > ~709 [correction, round 5: all-equal inputs DO occur --
+the toy chain visits q = 0 states (20,866 of 100,000 at L = 8, beta = 1);
+the v20 run of 2026-11-15, made after this fix, already includes them]; dropping u|d| from the
 prefactor estimate changes it by <= 2e-14 (|d| <= 100 in all experiments),
 and no accuracy case is within 1% of the 1e-10 threshold.
 
@@ -2053,3 +2055,30 @@ Status (v20): 10/10 required groups (Group 11: 6/6); clean under ASan+UBSan.
 Accuracy study: 525 refusals of 10206 (was 1806), max accepted error
 2.1e-13, max error/indicator 0.17.  PMR traces: 1399/1400 sampled reads
 accepted, max error 1.8e-13 against exact values.
+
+
+## Round 5: rounded midpoint (fourth audit, 2026-11-19)
+
+- **Mapped nodes outside [-1, 1].**  c = b/2 - a/2 and d = b/2 + a/2 are
+  rounded; on [2^51 + 0.5, 2^51 + 2] this gave d = 2^51 + 1, c = 0.75 and
+  y(b) = 4/3, outside the domain of the tail bound (the auditor measured
+  5.7e-12 error with an indicator of 4.6e-15 for a single pushed node; on
+  arm64 the error happened to stay at 1e-16).  New
+  `detail::fit_halfwidth`: c is enlarged (max with b - d, d - a, then
+  nextafter) until fl(fl(b - d)/c) <= 1 and fl(fl(a - d)/c) >= -1; by
+  monotone rounding every node in [a, b] then maps into [-1, 1].  Applied
+  in ExpDivDiff, IncrementalStack and the legacy class.  Exact: the series
+  then represents e^x on [d - c, d + c], which contains [a, b].
+- Test U7 (Group 11): the auditor's case against mpmath (single node,
+  four equal nodes, batch three nodes; errors <= 4.4e-16) and 2000 random
+  intervals at offsets 2^30..2^50.
+- Effect on the experiments: c changes by at most a few ulps, only where
+  (a + b)/2 is inexact.  The accuracy study was re-run (same nodes and
+  references): refusals 525 and maximum accepted error 2.085e-13
+  unchanged; only the nearly-coincident row of Table 6.1 moves at the
+  rounding level; max error/indicator 0.154 (was 0.166).  Its CSVs and
+  figures were replaced.  Other experiments use intervals with exact
+  midpoints (symmetric [-c, c], integer PMR levels) or tight intervals
+  whose change is at the rounding level; they were not re-run.
+
+Status: 10/10 required groups (Group 11: 7/7); clean under ASan+UBSan.
