@@ -6,8 +6,9 @@ Outputs: FIG.pdf (two heatmaps of the median relative error of the ratio
          against the exact ratio, per (c, q) cell), SUMMARY.csv
          (per-cell medians and counts); a short summary on stdout.
 
-Chebyshev cells use accepted pairs only (indicator <= 1e-10); dots mark
-cells with refusals, and a cell where all pairs were refused is grey.
+Chebyshev cells: ratios from evaluate_ratio_scaled with the default
+settings (no pair is refused); dots mark cells where some pairs were
+evaluated by scaling and squaring.
 MNP cells use pairs where both MNP values were finite and positive;
 crosses mark cells with at least one failure, and a cell where all
 failed is grey.
@@ -27,18 +28,19 @@ mp.mp.dps = 40
 ref = {int(r["instance"]): mp.mpf(r["value"]) for r in csv.DictReader(open(ref_f))}
 
 FLOOR = 1e-17
-cells = defaultdict(lambda: {"cheb": [], "mnp": [], "n": 0, "refused": 0,
+cells = defaultdict(lambda: {"cheb": [], "mnp": [], "n": 0, "refused": 0, "sq": 0,
                              "mnp_fail": 0, "ratio_est": []})
 worst_cheb, worst_ratio_est, worst_mnp = 0.0, 0.0, 0.0
 for r in csv.DictReader(open(res_f)):
     k = int(r["pair"]); q = int(r["q"]); c = float(r["c"])
     exact = ref[2 * k] / ref[2 * k + 1]
     cell = cells[(q, c)]; cell["n"] += 1
-    cheb, est = float(r["cheb"]), float(r["cheb_est"])
-    if r["cheb_refused"] == "1" or not math.isfinite(cheb):
+    est = float(r["cheb_est"])
+    if r["cheb_refused"] == "1":
         cell["refused"] += 1
     else:
-        e = float(abs((mp.mpf(cheb) - exact) / exact))
+        cell["sq"] += int(r["cheb_sq"]) > 0
+        e = float(abs(mp.expm1(mp.mpf(r["cheb_log"]) - mp.log(exact))))
         cell["cheb"].append(e); worst_cheb = max(worst_cheb, e)
         if est > 0:
             cell["ratio_est"].append(e / est); worst_ratio_est = max(worst_ratio_est, e / est)
@@ -52,17 +54,18 @@ for r in csv.DictReader(open(res_f)):
 qs = sorted({k[0] for k in cells}); cs = sorted({k[1] for k in cells})
 with open(sum_f, "w", newline="") as fo:
     w = csv.writer(fo)
-    w.writerow(["q", "c", "pairs", "cheb_refused", "cheb_median", "cheb_max",
+    w.writerow(["q", "c", "pairs", "cheb_refused", "cheb_squaring", "cheb_median", "cheb_max",
                 "mnp_failed", "mnp_median", "mnp_max"])
     for q in qs:
         for c in cs:
             d = cells[(q, c)]
             f = lambda v, g: f"{g(v):.3e}" if v else ""
-            w.writerow([q, c, d["n"], d["refused"], f(d["cheb"], st.median), f(d["cheb"], max),
+            w.writerow([q, c, d["n"], d["refused"], d["sq"], f(d["cheb"], st.median), f(d["cheb"], max),
                         d["mnp_fail"], f(d["mnp"], st.median), f(d["mnp"], max)])
 
 n_all = sum(d["n"] for d in cells.values())
-print(f"e7: {n_all} pairs; Chebyshev accepted {n_all - sum(d['refused'] for d in cells.values())}, "
+print(f"e7: {n_all} pairs; Chebyshev refused {sum(d['refused'] for d in cells.values())}, "
+      f"by squaring {sum(d['sq'] for d in cells.values())}, "
       f"max rel. error of accepted ratios {worst_cheb:.2e}, max error/indicator {worst_ratio_est:.2f}")
 print(f"e7: MNP failed on {sum(d['mnp_fail'] for d in cells.values())} pairs; "
       f"max rel. error where finite {worst_mnp:.2e}")
@@ -86,8 +89,10 @@ for a, key, fail, title in ((ax[0], "cheb", "refused", "Chebyshev--Bessel"),
     for i, q in enumerate(qs):
         for j, c in enumerate(cs):
             d = cells[(q, c)]
-            if 0 < d[fail] < d["n"]:
-                a.plot(j + 0.5, i + 0.5, "k." if key == "cheb" else "kx", ms=4 if key == "cheb" else 5)
+            if key == "cheb" and d["sq"] > 0:
+                a.plot(j + 0.5, i + 0.5, "k.", ms=4)
+            if key == "mnp" and 0 < d[fail] < d["n"]:
+                a.plot(j + 0.5, i + 0.5, "kx", ms=5)
     a.set_xticks(np.arange(len(cs)) + 0.5); a.set_xticklabels([f"{c:g}" for c in cs], rotation=90, fontsize=7)
     a.set_yticks(np.arange(len(qs)) + 0.5); a.set_yticklabels([str(q) for q in qs], fontsize=7)
     a.set_xlabel("half-width $c$"); a.set_ylabel("order $q$"); a.set_title(title, fontsize=9)

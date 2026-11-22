@@ -2,7 +2,7 @@
 // main.cpp -- CI driver for the Chebyshev exponential divided-difference
 //             reference implementation.
 //
-// Runs ten required test groups plus one informational group, and reports
+// Runs eleven required test groups plus one informational group, and reports
 // per-group pass/fail.  Exits non-zero on any *required* failure, so it can
 // serve as the entry point for an automated build.  The informational group
 // is reported separately and does not gate the exit code.
@@ -1324,10 +1324,111 @@ static bool run_audit3_tests() {
     return ok;
 }
 
+// Group 12: scaling-and-squaring fallback (2026-11-22).  Width-dominated
+// node sets on which the Chebyshev--Bessel series is ill-conditioned on
+// every interval (the series refused them before) are evaluated by
+// halving the nodes, computing all segment divided differences there,
+// and squaring with positive terms only.  References: mpmath residue
+// sums at 3000 digits.
+static bool run_squaring_tests() {
+    std::printf("\n=== Group 12: scaling-and-squaring fallback ===\n");
+    int passes = 0, total = 0;
+    auto report = [&](const char* name, bool ok, double v) {
+        ++total; if (ok) ++passes;
+        std::printf("  %-52s %s (%.2e)\n", name, ok ? "OK" : "FAIL", v);
+    };
+    using SR = chebyshev::ExpDivDiff<double>::ScaledReal;
+    auto rel_log = [](const SR& v, long double log_ref) {
+        return static_cast<double>(std::abs(std::expm1(v.log_abs() - log_ref)));
+    };
+    std::vector<double> v1{100.0};
+    for (int k = 1; k <= 20; ++k) v1.push_back(-100.0 + k * 0.001);
+    std::vector<double> v2;
+    for (int k = 0; k <= 100; ++k) v2.push_back(-1000.0 + 20.0 * k);
+    std::vector<double> v3 = v2; v3[37] = 13.25;
+    struct Case { const std::vector<double>* x; long double lref; const char* name; };
+    const Case cases[] = {
+        {&v1, -5.9652972950838958963477458722L, "V1 cluster at a + far node, q=20, c=100"},
+        {&v2, 336.687396882922048056124153163L, "V2 equispaced, q=100, c=1000"},
+    };
+    for (const Case& cs : cases) {
+        bool ok = false; double r = 1.0;
+        try {
+            const auto& x = *cs.x;
+            chebyshev::ExpDivDiff<double> e(*std::min_element(x.begin(), x.end()),
+                                            *std::max_element(x.begin(), x.end()));
+            // the series alone refuses these sets ...
+            e.set_squaring_fallback(false);
+            bool refused = false;
+            try { (void) e.evaluate_scaled(x); } catch (const std::runtime_error&) { refused = true; }
+            // ... and the fallback returns an accurate value.
+            e.set_squaring_fallback(true);
+            const SR v = e.evaluate_scaled(x);
+            r = rel_log(v, cs.lref);
+            ok = refused && e.last_squarings() > 0 && r < 1e-12 &&
+                 r <= e.last_error_estimate();
+        } catch (const std::exception&) { ok = false; }
+        report(cs.name, ok, r);
+    }
+    {   // V3: ratio whose common-interval form is refused
+        bool ok = false; double r = 1.0;
+        try {
+            chebyshev::ExpDivDiff<double> e(-1000.0, 1000.0);
+            const double ratio = e.evaluate_ratio(v2, v3);
+            r = std::abs(ratio / 0.783134921359110415108055627201 - 1.0);
+            ok = r < 1e-12 && e.last_squarings() > 0 && r <= e.last_error_estimate();
+        } catch (const std::exception&) { ok = false; }
+        report("V3 ratio fallback, q=100, c=1000", ok, r);
+    }
+    // V4-V7: double-double escalation at huge c and a non-power-of-two c;
+    // references: closed forms / mpmath (e9_make.py, mp_reference.py).
+    auto rel_me = [](const SR& v, long double m_ref, long e_ref) {
+        return static_cast<double>(std::abs(std::ldexp(static_cast<long double>(v.mantissa),
+                   static_cast<int>(v.exponent - e_ref)) / m_ref - 1.0L));
+    };
+    auto equispaced = [](double c, int q) {
+        std::vector<double> x; const double h = 2 * c / q;
+        for (int j = 0; j <= q; ++j) x.push_back(-c + j * h);
+        return x;
+    };
+    struct Big { std::vector<double> x; long double m; long e; int prec; const char* name; };
+    std::vector<double> cf(32, -1048576.0); cf.push_back(1048576.0);
+    const Big big[] = {
+        {equispaced(16777216.0, 8), 0.5083573679502008573938L, 24204216L, 2,
+         "V4 equispaced q=8, c=2^24 (double-double)"},
+        {cf, 0.6575603370097314814199L, 1512104L, 2, "V5 32 nodes at -c, one at c, c=2^20 (dd)"},
+        {equispaced(268435456.0, 128), 0.5028658383772473325525L, 387266970L, 2,
+         "V6 equispaced q=128, c=2^28 (dd, direct)"},
+        {{-1889.8766000000001, 3962.5611153688801, 1139.6752296043269, 1868.8270066331629,
+          2119.7554040724181, 4110.1234000000004}, 0.6042918988434855393502L, 5877L, 1,
+         "V7 off-centre q=5, c=3000 (working precision)"},
+    };
+    for (const Big& b : big) {
+        bool ok = false; double r = 1.0;
+        try {
+            const auto& x = b.x;
+            chebyshev::ExpDivDiff<double> e(*std::min_element(x.begin(), x.end()),
+                                            *std::max_element(x.begin(), x.end()));
+            const SR v = e.evaluate_scaled(x);
+            r = rel_me(v, b.m, b.e);
+            ok = r < 1e-12 && e.last_squarings() > 0 && e.last_squaring_precision() == b.prec &&
+                 r <= e.last_error_estimate();
+            // forced double-double agrees to the last bits
+            const SR w = e.evaluate_squaring_scaled(x, 2);
+            ok = ok && rel_me(w, b.m, b.e) < 1e-15;
+        } catch (const std::exception&) { ok = false; }
+        report(b.name, ok, r);
+    }
+    std::printf("  %d/%d squaring tests passed\n", passes, total);
+    const bool ok = passes == total;
+    std::printf("=== %s ===\n", ok ? "Group 12 PASS" : "Group 12 FAIL");
+    return ok;
+}
+
 int main() {
     std::printf("\n");
     std::printf("=========================================================\n");
-    std::printf(" Chebyshev exp-divdiff CI: 10 required groups + 1 informational\n");
+    std::printf(" Chebyshev exp-divdiff CI: 11 required groups + 1 informational\n");
     std::printf("=========================================================\n");
 
     int required_total = 0, required_passed = 0;
@@ -1343,6 +1444,7 @@ int main() {
     record_required(run_stack_tests()); std::fflush(stdout);
     record_required(run_audit2_tests()); std::fflush(stdout);
     record_required(run_audit3_tests()); std::fflush(stdout);
+    record_required(run_squaring_tests()); std::fflush(stdout);
     run_mpmath_reference_test();
     // Group 7 is informational only; it does not gate exit status.
 

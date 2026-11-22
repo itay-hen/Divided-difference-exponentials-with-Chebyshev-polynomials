@@ -47,6 +47,9 @@ from multiprocessing import Pool
 import mpmath
 from mpmath import mp, mpf
 
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(0)   # values at large |x| have long mantissas
+
 REL_TOL = mpf("1e-25")
 
 

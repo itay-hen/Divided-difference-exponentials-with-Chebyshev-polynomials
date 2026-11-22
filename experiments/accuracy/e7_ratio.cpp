@@ -11,10 +11,15 @@
 // Output (argv[1] = output prefix):
 //   PREFIX_nodes.csv    instance,nodes      (instance 2k: x, 2k+1: x')
 //                       for mp_reference.py
-//   PREFIX_results.csv  pair,q,c,trial,cheb,cheb_est,cheb_refused,mnp
-//     cheb       ratio from evaluate_ratio with the threshold disabled
-//     cheb_est   the indicator kappa*u*N of the ratio (sum of both)
-//     cheb_refused 1 if cheb_est > 1e-10 (default threshold)
+//   PREFIX_results.csv  pair,q,c,trial,cheb,cheb_est,cheb_refused,cheb_sq,mnp
+//     cheb       ratio from evaluate_ratio_scaled with the default settings
+//                (threshold 1e-10; if the common-interval ratio is
+//                refused, both values are evaluated in full, with the
+//                retries and, if needed, scaling and squaring)
+//     cheb_log   natural log of the ratio (finite even if cheb overflows)
+//     cheb_est   the indicator of the ratio (sum of both)
+//     cheb_refused 1 if evaluate_ratio threw (no value)
+//     cheb_sq    squarings used (0: common-interval series)
 //     mnp        MNP ratio; nan if either evaluation failed or was not
 //                finite and positive
 //
@@ -33,14 +38,13 @@ int main(int argc, char** argv) {
     FILE* fn = std::fopen((pre + "_nodes.csv").c_str(), "w");
     FILE* fr = std::fopen((pre + "_results.csv").c_str(), "w");
     std::fprintf(fn, "instance,nodes\n");
-    std::fprintf(fr, "pair,q,c,trial,cheb,cheb_est,cheb_refused,mnp\n");
+    std::fprintf(fr, "pair,q,c,trial,cheb,cheb_log,cheb_est,cheb_refused,cheb_sq,mnp\n");
     const std::vector<int> qs = {1, 2, 5, 10, 20, 50, 100, 200, 500};
     const std::vector<double> cs = {0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000};
     std::mt19937_64 rng(20261119);
     int pair = 0;
     for (int q : qs) for (double c : cs) {
         chebyshev::ExpDivDiff<double> e(-c, c, 1e-14, 100000);
-        e.set_max_error_estimate(1e300L);
         std::uniform_real_distribution<double> U(-c, c);
         std::uniform_int_distribution<int> J(0, q);
         for (int t = 0; t < TRIALS; ++t, ++pair) {
@@ -56,10 +60,15 @@ int main(int argc, char** argv) {
                     std::fprintf(fn, "%s%.17g", i ? " " : "", y[i]);
                 std::fprintf(fn, "\n");
             }
-            double cheb = NAN; long double est = NAN;
+            double cheb = NAN; long double est = NAN, lg = NAN;
+            int refused = 1, sq = 0;
             try {
-                cheb = e.evaluate_ratio(x, xp);
+                const auto r = e.evaluate_ratio_scaled(x, xp);
+                cheb = r.to_real();
+                lg = r.log_abs();
                 est = e.last_error_estimate();
+                sq = e.last_squarings();
+                refused = 0;
             } catch (...) {}
             double mnp = NAN;
             try {
@@ -67,8 +76,8 @@ int main(int argc, char** argv) {
                 const double b = mccurdy_templated::ExpDivDiff<double>::compute(xp);
                 if (std::isfinite(a) && std::isfinite(b) && a > 0 && b > 0) mnp = a / b;
             } catch (...) {}
-            std::fprintf(fr, "%d,%d,%g,%d,%.17g,%.3Le,%d,%.17g\n", pair, q, c, t,
-                         cheb, est, (est > 1e-10L) ? 1 : 0, mnp);
+            std::fprintf(fr, "%d,%d,%g,%d,%.17g,%.21Lg,%.3Le,%d,%d,%.17g\n", pair, q, c, t,
+                         cheb, lg, est, refused, sq, mnp);
         }
     }
     std::fclose(fn); std::fclose(fr);
