@@ -13,7 +13,7 @@ platforms whose standard library lacks it, e.g. Apple libc++).
 
 * **Batch evaluation.** O(qN) per evaluation. On operation traces recorded
   from a permutation-matrix-representation QMC code (PMR-QMC), batch
-  evaluation was 1.7–36× faster than the incremental routine that code uses
+  evaluation was 1.7–39× faster than the incremental routine that code uses
   (`experiments/pmr_traces`).
 * **Incremental updates.** With a fixed interval, appending a node costs
   Θ(N_max − q) and removing the most recently appended node costs O(1)
@@ -30,8 +30,14 @@ platforms whose standard library lacks it, e.g. Apple libc++).
   `evaluate()` retries on [min x, max x] and then on [min x − s·w, max x],
   s = 1, 2 (w = max x − min x), which puts the midpoint at the smallest node
   and removes the last mechanism. The code computes an error indicator κ·u·N
-  and **raises an exception instead of returning an inaccurate value**; use
-  MNP (`mccurdy.hpp`) or higher precision there.
+  and never returns a value whose indicator exceeds the threshold (1e-10).
+  Where no interval helps (q ≲ c, large c), it falls back to **scaling and
+  squaring**: the nodes are halved until the series is well conditioned and
+  squared back with exp[2w_i..2w_j] = 2^{i−j} Σ_k exp[w_i..w_k] exp[w_k..w_j],
+  whose terms are all positive and cannot cancel. Its error grows like
+  2^s·u ≈ c·u (as for MNP); when that exceeds the threshold (c beyond a few
+  10⁴) the step is repeated in double-double arithmetic. In all tests (about
+  15,000 node sets, up to c = 2²⁸) every call returned an accurate value.
 * **Range.** All intermediate quantities are scaled; any order works (tested
   to q = 3000). Values outside double range are returned in mantissa/exponent
   form; ratios of same-order values on the same interval are formed directly.
@@ -49,7 +55,9 @@ chebyshev::ExpDivDiff<double> e(-1.0, 1.0);          // interval [a, b]
 double v = e.evaluate({-0.5, 0.0, 0.3, 0.7});
 auto s   = e.evaluate_scaled(nodes);                 // mantissa * 2^exponent
 double r = e.evaluate_ratio(nodes1, nodes2);         // same order, same interval
-long double est = e.last_error_estimate();           // kappa * u * N
+auto rs  = e.evaluate_ratio_scaled(nodes1, nodes2);  // ratios outside double range
+long double est = e.last_error_estimate();           // error indicator
+int sq = e.last_squarings();                         // 0: series; >0: scaling and squaring
 
 // Incremental: append / LIFO remove on a fixed interval.
 chebyshev::IncrementalStack<double> st(a, b, /*q_max=*/1000);
@@ -72,7 +80,7 @@ costs extra terms; raising b above the nodes costs accuracy ~ e^{b − max xᵢ}
 | `chebyshev_stack.hpp` | Incremental evaluator (weighted contiguous columns, per-prefix gating) |
 | `mccurdy.hpp` | McCurdy–Ng–Parlett baseline (entry-wise Taylor convergence, divided-difference squaring) |
 | `incremental_chebyshev_exp_divdiff.hpp` | Legacy incremental class, superseded by `chebyshev_stack.hpp`; kept for older tests |
-| `main.cpp` + `test_*.hpp` | Test driver: 10 required groups + 1 informational (mpmath) group |
+| `main.cpp` + `test_*.hpp` | Test driver: 11 required groups + 1 informational (mpmath) group |
 | `mpmath_reference.py`, `cases.csv`, `reference.csv` | High-precision reference values for the informational group |
 | `experiments/` | Drivers and plotting scripts for every figure and table of the paper; `experiments/run_v20.sh` regenerates all of them |
 | `experiments/pmr_traces/` | PMR-QMC operation traces: recorder, replay, exact-value check |

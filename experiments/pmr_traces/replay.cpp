@@ -37,13 +37,13 @@
 //           ill-conditioned and almost every push is refused.)
 //   stack0  the naive variant: one fixed interval for the whole run (the
 //           range of all nodes in the trace) and PMR's own node order.
-// A Q that a Chebyshev evaluator refuses (indicator above 1e-10) is
-// answered by a fresh GBH evaluation of the set (counted as a fallback and
-// timed with that evaluator).  Accuracy: largest |log difference| from the
-// batch column, which holds either a value accepted by batch (indicator
-// <= 1e-10) or a fresh GBH evaluation (both accurate to ~1e-13 against
-// exact values on sampled queries), over the queries where the evaluator
-// returned its own value.  gbh is driven incrementally, as in PMR-QMC,
+// batch: if the three cached intervals are refused, the library's full
+// chain (retries, then scaling and squaring) answers the read.  stack,
+// stack0: a read the stack cannot serve (refused pushes) is answered by
+// that full batch chain (counted as a fallback and timed with the stack).
+// A fresh GBH evaluation is used only if even the full chain throws (never
+// in our runs).  Accuracy: largest |log difference| from the batch column,
+// over the queries where the evaluator returned its own value.  gbh is driven incrementally, as in PMR-QMC,
 // and its state accumulates rounding errors over long add/remove streams.
 //
 // Build: g++ -std=c++17 -O3 -march=native -I../.. -I/opt/homebrew/include replay.cpp -o replay
@@ -134,7 +134,16 @@ long double gbh_fresh(const std::vector<double>& x) {
     return gbh_log(d, static_cast<int>(x.size()) - 1);
 }
 
-struct Stats { long fallbacks = 0, rebuilds = 0, pushes = 0; };
+// Our batch method with the full chain (retries, scaling and squaring):
+// the fallback of the incremental stacks for reads they refused.
+long double batch_full(const std::vector<double>& x) {
+    const auto mm = std::minmax_element(x.begin(), x.end());
+    const double lo = *mm.first, hi = *mm.second;
+    Batch E(lo == hi ? lo - 1.0 : lo, lo == hi ? lo + 1.0 : hi);
+    return E.evaluate_scaled(x).log_abs();
+}
+
+struct Stats { long fallbacks = 0, rebuilds = 0, pushes = 0, squarings = 0; };
 
 // ---------------------------------------------------------------- GBH
 double replay_gbh(const Trace& T, std::vector<long double>& out) {
@@ -179,6 +188,10 @@ double replay_batch(const Trace& T, std::vector<long double>& out,
                 auto& E = cache[{a, hi}];
                 if (!E) E.reset(new Batch(a, hi));
                 try { out.push_back(E->evaluate_scaled_fixed(sh).log_abs()); own.push_back(1); done = true; }
+                catch (const std::runtime_error&) {}
+            }
+            if (!done) {   // full chain of the library: retries, then scaling and squaring
+                try { Batch E(lo, hi); out.push_back(E.evaluate_scaled(sh).log_abs()); own.push_back(1); ++S.squarings; done = true; }
                 catch (const std::runtime_error&) {}
             }
             if (!done) { out.push_back(gbh_fresh(sh)); own.push_back(0); ++S.fallbacks; }
@@ -246,7 +259,7 @@ double replay_stack(const Trace& T, std::vector<long double>& out,
             if (valid == static_cast<int>(ms.size())) {
                 out.push_back(st->value_scaled().log_abs()); own.push_back(1);
             } else {
-                out.push_back(gbh_fresh(ms)); own.push_back(0); ++S.fallbacks;
+                out.push_back(batch_full(ms)); own.push_back(1); ++S.fallbacks;
             }
             break;
         }
@@ -283,7 +296,7 @@ double replay_stack0(const Trace& T, std::vector<long double>& out,
         case 'C': st.clear(); sh.clear(); valid = 0; break;
         case 'Q':
             if (valid == static_cast<int>(sh.size())) { out.push_back(st.value_scaled().log_abs()); own.push_back(1); }
-            else { out.push_back(gbh_fresh(sh)); own.push_back(0); ++S.fallbacks; }
+            else { out.push_back(batch_full(sh)); own.push_back(1); ++S.fallbacks; }
             break;
         }
     }

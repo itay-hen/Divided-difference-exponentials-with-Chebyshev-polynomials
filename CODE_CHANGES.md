@@ -2109,3 +2109,74 @@ in corrected form:
   152 neither (75 of those recovered by evaluate() on each set
   separately, errors <= 4.0e-13).
 - All three are in run_v20.sh.  No library code changed.
+
+## Round 7: scaling and squaring -- no refusals (2026-11-22)
+
+The series refused width-dominated node sets (q <~ c, large c, bulk of the
+nodes far below b): any expansion of e^x on an interval containing all
+nodes has terms of size e^b, while the result is e^xi / q!.  No interval
+helps.  MNP avoids this by squaring, whose sums have positive terms only.
+
+- `ExpDivDiff::evaluate_by_squaring_` (last resort of evaluate /
+  evaluate_scaled after the interval retries; `set_squaring_fallback`,
+  default on; `last_squarings()`): nodes sorted, shifted by d and halved s
+  times until c 2^-s <= 1; for each start i the recurrence (weighted form,
+  certified tail check per column) gives exp[w_i..w_j] for all j; then s
+  applications of exp[2w_i..2w_j] = 2^{i-j} sum_k exp[w_i..w_k]
+  exp[w_k..w_j] with mantissa/exponent entries (terms aligned to the
+  largest exponent via a power-of-two table); times e^d (exact).
+  Indicator 2^s u (4 + 2 sqrt(q+1)) + prefactor terms (the worst-case
+  bound 2^s (2N + 3q) u is ~10^3 times pessimistic).  Cost O(s q^3):
+  0.2 ms (q=20) to 28 ms (q=200) at c=1000, 4-10x our MNP baseline.
+- `evaluate_ratio`: if the common-interval ratio is refused, both values
+  are evaluated in full (retries, squaring), each with half the error
+  budget so that the summed indicator stays below the threshold.  New
+  `evaluate_ratio_scaled` for ratios outside the double range.
+- Tests: Group 12 (V1 cluster at a + far node, q=20, c=100; V2
+  equispaced q=100, c=1000; V3 ratio fallback), references from 3000-digit
+  residue sums.  11/11 required groups; ASan+UBSan clean.
+- Results: accuracy study 0 refusals (was 525; those 525 now by
+  squaring, errors <= 2.1e-14), max error 2.085e-13, max error/indicator
+  0.154.  New E8 (`accuracy/e8_values.cpp`, `e8_analyze.py`, Fig. 6.1):
+  3240 single values over 0.1<=c<=1000, 1<=q<=500, all accurate to
+  1.7e-13 (406 by squaring, <= 9.4e-14); MNP under/overflows on 878.
+  E7 ratios: 1620/1620 returned (219 with squaring), <= 4.3e-13.
+- Figures: `scaling/plot_N.py` (Figs. 5.1, 5.2 in arXiv style, and the
+  kappa*u*N map for SM10); R_n figure back in the main text (Fig. 2.1).
+
+## Round 7b: double-double escalation, calibrated indicator, routing (2026-11-22)
+
+- The squaring routine is templated on its arithmetic (`squaring_core_<F>`,
+  F = Real or `detail::DD`).  New `detail::DD` (Dekker two-sum, fma
+  two-product, add/mul/div) and `detail::dd_exp_split` (ln2 to 1e-49).  In
+  double-double the shift x - d is exact, and the Bessel ratios, 2/c',
+  I_0(c') (power series) and e^{w_i} (Taylor) are formed in DD: a
+  working-precision constant is amplified by 2^s like any other error
+  (found on non-power-of-two c: DD error 5e-16 before, 9e-17 after).
+- Indicator of the squaring path, calibrated on E9 (below):
+  2^s u (8 + q/4) + u c (working precision; the q term covers the base
+  table's rounding, up to ~0.23 q u at q = 500, small s), and
+  2^s u_dd (8 + q/4) + 2u in double-double.  If the working-precision
+  indicator exceeds the threshold (c beyond a few 1e4), the step is
+  repeated in double-double.  New API: `evaluate_squaring_scaled(nodes,
+  precision)` (test/calibration hook), `last_squaring_precision()`.
+- Routing: `prefer_squaring_` sends sets with q < c to squaring directly
+  when the series (Bessel ratios O(c) per interval, weight 10, plus
+  O(qN)) would cost > 10x the squaring (O((s+1) q^3), x8 in DD).  The
+  Bessel-ratio table is sized once to ~1.5 sqrt(2 c ln(1/tol)) instead of
+  being recomputed at O(c) on every doubling (c = 2^28 previously stalled
+  for > 12 min).  A non-convergence exception of the series on the
+  constructor interval now enters the retry chain instead of escaping.
+- Tests: Group 12 V4-V7 (equispaced q=8, c=2^24; cluster + far node,
+  c=2^20; equispaced q=128, c=2^28; off-centre q=5, c=3000), references
+  from closed forms / mpmath.  11/11 groups; ASan+UBSan clean.
+- E9 (`accuracy/e9_make.py`, `e9_squaring.cpp`, `e9_analyze.py`): closed-
+  form families up to c = 2^28 and off-centre random sets (c <= 3e4):
+  working-precision error ~0.17 * 2^s u (<= 1.32 * 2^s u); DD <= 1.0e-16;
+  default call never fails, max error 5.4e-12 (threshold 1e-10).  Forced
+  squaring on the 3240 E7/E8 sets: error/indicator <= 0.66 (DD <= 0.26).
+- PMR replay: the batch method uses the library's full chain after its
+  cached intervals (never needs GBH); stack fallbacks go to that batch
+  chain.  Batch 1.7-39x faster than GBH; stack 2.5-36x slower than batch.
+- mp_reference.py: lifts Python's int-to-str digit limit (long mantissas
+  at large |x|).
