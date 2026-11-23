@@ -18,7 +18,7 @@ INC=(-I"$ROOT" -I/opt/homebrew/include)            # Boost.Math for cyl_bessel_i
 
 for p in e5_runtime e5_refusal_stats e5_interval_sensitivity e6_stack_micro e6_qmc_chain \
          e6_incremental_micro e6_incremental_order e6_qmc_chain_legacy; do
-  $CXX $FLAGS "${INC[@]}" "$HERE/$p.cpp" -o "$BUILD/$p"
+  $CXX $FLAGS "${INC[@]}" "$HERE/$p.cpp" -o "$BUILD/$p" -L/opt/homebrew/lib -lmpfr -lgmp
 done
 
 "$BUILD/e5_runtime"              "$DATA"

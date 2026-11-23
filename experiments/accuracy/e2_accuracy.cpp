@@ -127,7 +127,7 @@ struct Run {
     Scaled v;
     int N = -1;
     double ku = NAN, kuN = NAN;
-    int sq = 0;   // squarings used (0: series)
+    int sq = 0;   // bits of the extended-precision series (0: double)
 };
 
 // One Chebyshev run; catches the documented refusal / non-convergence throws.
@@ -145,7 +145,7 @@ static Run run_cheb(double a, double b, const std::vector<double>& x, double thr
     }
     r.ku = static_cast<double>(E.last_condition_estimate());
     r.kuN = static_cast<double>(E.last_error_estimate());
-    r.sq = E.last_squarings();
+    r.sq = (E.last_precision_bits() > 53 ? E.last_precision_bits() : 0);
     return r;
 }
 
@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
     std::fprintf(fr, "instance,q,c,config,rep,ordering");
     for (const char* p : {"prod", "ab", "tight", "unsorted"})
         std::fprintf(fr, ",%s_status,%s_mant,%s_exp,%s_N,%s_ku,%s_kuN", p, p, p, p, p, p);
-    std::fprintf(fr, ",mnp,prod_sq\n");
+    std::fprintf(fr, ",mnp,prod_ext\n");
 
     const std::vector<int> qs = {5, 20, 50, 100, 150, 300};
     const std::vector<double> cs = {1.0, 10.0, 100.0};

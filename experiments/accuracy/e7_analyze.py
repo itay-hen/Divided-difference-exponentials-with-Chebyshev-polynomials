@@ -8,7 +8,7 @@ Outputs: FIG.pdf (two heatmaps of the median relative error of the ratio
 
 Chebyshev cells: ratios from evaluate_ratio_scaled with the default
 settings (no pair is refused); dots mark cells where some pairs were
-evaluated by scaling and squaring.
+evaluated by extended precision.
 MNP cells use pairs where both MNP values were finite and positive;
 crosses mark cells with at least one failure, and a cell where all
 failed is grey.
@@ -39,8 +39,9 @@ for r in csv.DictReader(open(res_f)):
     if r["cheb_refused"] == "1":
         cell["refused"] += 1
     else:
-        cell["sq"] += int(r["cheb_sq"]) > 0
-        e = float(abs(mp.expm1(mp.mpf(r["cheb_log"]) - mp.log(exact))))
+        cell["sq"] += int(r["cheb_ext"]) > 0
+        v = mp.mpf(r["cheb_mant"]) * mp.mpf(2) ** int(r["cheb_exp"])   # exact value returned
+        e = float(abs((v - exact) / exact))
         cell["cheb"].append(e); worst_cheb = max(worst_cheb, e)
         if est > 0:
             cell["ratio_est"].append(e / est); worst_ratio_est = max(worst_ratio_est, e / est)
@@ -54,7 +55,7 @@ for r in csv.DictReader(open(res_f)):
 qs = sorted({k[0] for k in cells}); cs = sorted({k[1] for k in cells})
 with open(sum_f, "w", newline="") as fo:
     w = csv.writer(fo)
-    w.writerow(["q", "c", "pairs", "cheb_refused", "cheb_squaring", "cheb_median", "cheb_max",
+    w.writerow(["q", "c", "pairs", "cheb_refused", "cheb_extuaring", "cheb_median", "cheb_max",
                 "mnp_failed", "mnp_median", "mnp_max"])
     for q in qs:
         for c in cs:
@@ -65,7 +66,7 @@ with open(sum_f, "w", newline="") as fo:
 
 n_all = sum(d["n"] for d in cells.values())
 print(f"e7: {n_all} pairs; Chebyshev refused {sum(d['refused'] for d in cells.values())}, "
-      f"by squaring {sum(d['sq'] for d in cells.values())}, "
+      f"in extended precision {sum(d['sq'] for d in cells.values())}, "
       f"max rel. error of accepted ratios {worst_cheb:.2e}, max error/indicator {worst_ratio_est:.2f}")
 print(f"e7: MNP failed on {sum(d['mnp_fail'] for d in cells.values())} pairs; "
       f"max rel. error where finite {worst_mnp:.2e}")

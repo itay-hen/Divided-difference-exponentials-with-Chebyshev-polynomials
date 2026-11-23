@@ -2180,3 +2180,57 @@ helps.  MNP avoids this by squaring, whose sums have positive terms only.
   chain.  Batch 1.7-39x faster than GBH; stack 2.5-36x slower than batch.
 - mp_reference.py: lifts Python's int-to-str digit limit (long mantissas
   at large |x|).
+
+## Round 8: one method — extended precision replaces scaling and squaring (2026-11-22)
+
+The scaling-and-squaring fallback of Rounds 7/7b is removed. The last
+resort of `evaluate`, `evaluate_scaled` and `evaluate_ratio(_scaled)` is
+now the **same Chebyshev–Bessel series** evaluated in p-bit binary
+floating point (MPFR), so the library implements a single method.
+
+* `chebyshev_exp_divdiff.hpp`
+  * Removed: `detail::DD` and the double-double helpers, `SqEntryT`,
+    `squaring_core_`, `squaring_estimate_`, `prefer_squaring_` (the
+    cost-based routing to squaring for huge c), `evaluate_by_squaring_`,
+    and the public `set_squaring_fallback`, `last_squarings`,
+    `last_squaring_precision`, `evaluate_squaring_scaled`.
+  * Added `extended_core_` (Algorithm 1 in MPFR: mapped nodes in p bits,
+    Bessel ratios by the backward recurrence started at
+    K ≥ max(2c, N) + p/3 + 64, same certified stopping rule, κ accumulated
+    alongside; the prefactor e^d I₀(c)/c^q is formed in p bits from
+    I₀(c) = e^c / (1 + 2 Σ R_n(c))), and `evaluate_extended_`, which tries
+    p = 128, 256, … (up to 2^16) on the tight and the lowered interval until
+    κ·2^{1−p}·N_eff + 2^{1−p}(|d| + c + q + 8) + 2u is below the threshold.
+    A saturated indicator is ~N and always exceeds the threshold, so the
+    precision cannot stop too early.
+  * Public API: `set_extended_precision(bool)` (default true),
+    `last_precision_bits()` (53 for the double-precision series),
+    `evaluate_extended_scaled(nodes, lo, hi, bits)` (test hook).
+  * Requires `-lmpfr -lgmp`.
+* `main.cpp` Group 12 rewritten: six node sets that the double-precision
+  series refuses (cluster + far node at c = 100; equispaced q = 100,
+  c = 1000; 50 nodes at −c + one at c, c = 100; 32 at −c + one at c,
+  c = 300; equispaced q = 128, c = 4096) and a ratio fallback, against
+  3000-digit references; plus the off-centre q = 5, c = 3000 set (accepted
+  in double precision). All pass; 11/11 required groups; clean under ASan/UBSan.
+* Experiments: E9 (squaring calibration) retired; E2/E7/E8 columns
+  `*_sq` → `*_ext` (bits of the extended series, 0 = double); E7 now
+  records the returned ratio as mantissa/exponent (the former log column
+  lost ~u·|log| in `long double` = double on arm64, which made the
+  error/indicator ratio look like 4.7 for 4e-15 errors); replay counters
+  renamed. All build scripts link MPFR.
+* Results: E2 10,206/10,206 returned, 525 in extended precision (128 or
+  256 bits), max error 9.4e-15 for those, 2.1e-13 overall, err/indicator
+  ≤ 0.20. E8 3240/3240, 406 extended, max 1.7e-14 (1.7e-13 overall),
+  err/indicator ≤ 0.24 (extended) / 0.55 (series). E7 1620/1620 ratios,
+  219 extended, max 4.3e-13, err/indicator ≤ 0.29.
+* Paper: Sec. 4.4 "Extended precision"; new bound κ ≤ e^{b−ξ} (Eq. 4.1,
+  proof in App. B.4); identity (4.2) for I₀; App. C.5, D.4 rewritten.
+* PMR-QMC replay re-run with this library: batch 1.6–34× faster than GBH,
+  stack 2.3–31× slower than batch (previous run 1.7–39 / 2.5–36; the
+  difference is run-to-run timing variation, the batch path on these reads
+  is unchanged). `exact_eval`/`exact_check.py` now compare mantissa/exponent
+  values instead of `long double` logarithms (same arm64 artifact as E7).
+* Cost of an extended evaluation (uniform and lower-clustered sets,
+  20 ≤ q ≤ 200, 100 ≤ c ≤ 1000): 0.3–56 ms including the failed
+  double-precision attempts, 5–60× the MNP baseline.

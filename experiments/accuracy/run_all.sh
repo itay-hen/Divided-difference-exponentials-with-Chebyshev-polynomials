@@ -10,7 +10,7 @@ DATA=${DATA:-"$ROOT/../../Data and figures/v18"}
 FIGS=${FIGS:-"$ROOT/../../tex/figs_v18"}
 BIN=${BIN:-"$HERE/bin"}
 mkdir -p "$DATA" "$FIGS" "$BIN"
-cxx() { g++ -std=c++17 -O2 -I"$ROOT" -I/opt/homebrew/include "$@"; }   # paths contain spaces
+cxx() { g++ -std=c++17 -O2 -I"$ROOT" -I/opt/homebrew/include "$@" -L/opt/homebrew/lib -lmpfr -lgmp; }   # paths contain spaces
 
 cxx "$HERE/e2_accuracy.cpp" -o "$BIN/e2_accuracy"
 cxx "$HERE/e3_code_N.cpp" -o "$BIN/e3_code_N"

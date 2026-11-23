@@ -12,12 +12,12 @@ mkdir -p "$DATA" "$FIGS" "$HERE/bin"
 if [ "$SKIP_LEGACY" = "1" ]; then
   cp "$PROJ/Data and figures/v18/"*legacy* "$PROJ/Data and figures/v18/e6_incremental_order.csv" "$DATA/" 2>/dev/null || true
 fi
-cxx() { g++ -std=c++17 -O3 -march=native -I"$ROOT" -I/opt/homebrew/include "$@"; }
+cxx() { g++ -std=c++17 -O3 -march=native -I"$ROOT" -I/opt/homebrew/include "$@" -L/opt/homebrew/lib -lmpfr -lgmp; }
 
 if [ "${RESUME_FROM:-}" = "" ]; then
 echo "== scaling"; cxx "$HERE/scaling/n_kappa_sweep.cpp" -o "$HERE/bin/n_kappa_sweep"
 for m in fixed tight pinned; do "$HERE/bin/n_kappa_sweep" "$DATA/n_kappa_sweep_$m.csv" $m; done
-python3 -I "$HERE/scaling/plot_N.py" "$DATA/n_kappa_sweep_pinned.csv" "$FIGS"   # Figs 5.1, 5.2, SM10 map
+python3 -I "$HERE/scaling/plot_N.py" "$DATA/n_kappa_sweep_pinned.csv" "$FIGS"   # Figs 5.1, 5.2, D.1 map
 python3 -I "$HERE/scaling/plot_Rn.py" "$FIGS/fig_Rn.pdf"
 
 echo "== stopping rule (E4)"; cxx "$HERE/accuracy/e4_stopping_rule.cpp" -o "$HERE/bin/e4_stopping_rule"
@@ -36,14 +36,6 @@ echo "== single values over (c, q) (E8, Fig. 6.1)"; cxx "$HERE/accuracy/e8_value
 python3 -I "$HERE/accuracy/e8_analyze.py" "$DATA/e8_values.csv" "$DATA/e7_ratio_ref.csv" \
   "$DATA/e7_ratio_results.csv" "$FIGS/fig_accuracy_map.pdf" "$DATA/e8_summary.csv"
 
-echo "== squaring calibration (E9, Sec. 4.4)"; cxx "$HERE/accuracy/e9_squaring.cpp" -o "$HERE/bin/e9_squaring"
-mkdir -p "$DATA/e9"; python3 -I "$HERE/accuracy/e9_make.py" "$DATA/e9"
-python3 -I "$HERE/accuracy/mp_reference.py" --nodes "$DATA/e9/e9_nodes_C.csv" --out "$DATA/e9/e9_ref_C.csv" --jobs 8
-"$HERE/bin/e9_squaring" "$DATA/e9/e9_nodes.csv" > "$DATA/e9/e9_out.csv"
-"$HERE/bin/e9_squaring" "$DATA/e7_ratio_nodes.csv" 200 > "$DATA/e9/e9_out_e7.csv"
-python3 -I "$HERE/accuracy/e9_analyze.py" "$DATA/e9/e9_out.csv" "$DATA/e9/e9_ref_closed.csv" "$DATA/e9/e9_ref_C.csv" \
-  --families "$DATA/e9/e9_families.csv" --csv "$DATA/e9/e9_summary.csv"
-python3 -I "$HERE/accuracy/e9_analyze.py" "$DATA/e9/e9_out_e7.csv" "$DATA/e7_ratio_ref.csv" --csv "$DATA/e9/e9_summary_e7.csv"
 fi
 if [ "${RESUME_FROM:-}" = "e3" ]; then
   echo "== truncation (resume)"
