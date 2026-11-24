@@ -113,7 +113,8 @@ author's paper folders).
   title        = {Divided-difference exponentials with {C}hebyshev polynomials},
   howpublished = {GitHub repository},
   url          = {https://github.com/itay-hen/Divided-difference-exponentials-with-Chebyshev-polynomials},
-  year         = {2025}
+  note         = {Tag paper-v21, commit c1be44cfc06d7009059bd252f216b5b474f89a57},
+  year         = {2026}
 }
 ```
 
