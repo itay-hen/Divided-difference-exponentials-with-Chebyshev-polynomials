@@ -20,7 +20,8 @@ Apple libc++.
 * **Incremental updates.** With a fixed interval, appending a node costs
   Θ(N_max − q) and removing the most recently appended node costs O(1)
   (`chebyshev_stack.hpp`). For last-in-first-out updates an append takes
-  0.2–0.6 µs, up to ~10³× less than a full recomputation (q = 800). Interior
+  0.13 µs at c = 5 (independent of q) and 0.36–0.44 µs at c = 50, up to
+  1800× less than a full recomputation (q = 800). Interior
   removals cost a rebuild of the columns above them; on the PMR-QMC traces,
   which remove interior nodes and need large nodes first, the stack was
   slower than batch evaluation.
