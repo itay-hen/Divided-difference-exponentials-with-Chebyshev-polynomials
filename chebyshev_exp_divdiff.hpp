@@ -36,6 +36,8 @@
 #include <type_traits>
 #include <algorithm>
 #include <vector>
+#include <memory>
+#include <mpfr.h>
 
 namespace chebyshev {
 
@@ -101,81 +103,6 @@ inline Real fit_halfwidth(Real a, Real b, Real d, Real c) {
         c = std::nextafter(c, std::numeric_limits<Real>::infinity());
     }
     throw std::runtime_error("fit_halfwidth: cannot cover [a, b]");
-}
-
-/// Double-double arithmetic (hi + lo, |lo| <= u|hi|/2), used by the
-/// extended-precision squaring path.  Standard error-free
-/// transformations (Knuth two-sum, fma two-product).
-struct DD {
-    double hi = 0.0, lo = 0.0;
-    DD() = default;
-    DD(double h) : hi(h), lo(0.0) {}
-    DD(double h, double l) : hi(h), lo(l) {}
-};
-inline DD two_sum(double a, double b) {
-    const double s = a + b, bb = s - a;
-    return DD(s, (a - (s - bb)) + (b - bb));
-}
-inline DD quick_two_sum(double a, double b) {
-    const double s = a + b;
-    return DD(s, b - (s - a));
-}
-inline DD dd_add(const DD& a, const DD& b) {
-    DD s = two_sum(a.hi, b.hi);
-    const DD t = two_sum(a.lo, b.lo);
-    s.lo += t.hi;
-    s = quick_two_sum(s.hi, s.lo);
-    s.lo += t.lo;
-    return quick_two_sum(s.hi, s.lo);
-}
-inline DD dd_neg(const DD& a) { return DD(-a.hi, -a.lo); }
-inline DD dd_mul(const DD& a, const DD& b) {
-    const double p = a.hi * b.hi;
-    double e = std::fma(a.hi, b.hi, -p);
-    e += a.hi * b.lo + a.lo * b.hi;
-    return quick_two_sum(p, e);
-}
-inline DD dd_mul_d(const DD& a, double b) {
-    const double p = a.hi * b;
-    double e = std::fma(a.hi, b, -p);
-    e += a.lo * b;
-    return quick_two_sum(p, e);
-}
-inline DD dd_div(const DD& a, const DD& b) {
-    const double q1 = a.hi / b.hi;
-    DD r = dd_add(a, dd_neg(dd_mul_d(b, q1)));
-    const double q2 = r.hi / b.hi;
-    r = dd_add(r, dd_neg(dd_mul_d(b, q2)));
-    const double q3 = r.hi / b.hi;
-    return dd_add(quick_two_sum(q1, q2), DD(q3));
-}
-inline DD dd_div_d(const DD& a, double b) { return dd_div(a, DD(b)); }
-inline DD operator+(const DD& a, const DD& b) { return dd_add(a, b); }
-inline DD operator-(const DD& a, const DD& b) { return dd_add(a, dd_neg(b)); }
-inline DD operator*(const DD& a, const DD& b) { return dd_mul(a, b); }
-inline DD operator/(const DD& a, const DD& b) { return dd_div(a, b); }
-
-/// e^x = m 2^k with m in double-double, for an exact double x:
-/// x = k ln2 + r with ln2 = A + B + C (~1e-49) and r formed in
-/// double-double (the products k A, k B are exact two-products), then
-/// e^r by its Taylor series (|r| <= ln2/2).
-inline DD dd_exp_split(double x, long* k_out) {
-    constexpr double A = 0x1.62e42fefa39efp-1;
-    constexpr double B = 0x1.abc9e3b39803fp-56;
-    constexpr double C = 0x1.7b57a079a1934p-111;
-    const double kf = std::nearbyint(x / A);
-    if (!(std::abs(kf) < 0x1p52)) throw std::overflow_error("dd_exp_split: argument too large");
-    const DD p1(kf * A, std::fma(kf, A, -kf * A));
-    const DD p2(kf * B, std::fma(kf, B, -kf * B));
-    const DD r = ((DD(x) - p1) - p2) - DD(kf * C);
-    DD term(1.0), sum(1.0);
-    for (int n = 1; n < 40; ++n) {
-        term = dd_div_d(dd_mul(term, r), static_cast<double>(n));
-        sum = dd_add(sum, term);
-        if (std::abs(term.hi) < 1e-34 * std::abs(sum.hi)) break;
-    }
-    *k_out = static_cast<long>(kf);
-    return sum;
 }
 
 inline void exp_split(long double x, long double* m_out, long* k_out,
@@ -401,10 +328,10 @@ public:
      *      (w = max x - min x; see evaluate_tight_), which removes the
      *      cancellation of order-dominated sets concentrated below their
      *      largest node.
-     *   5. If the indicator is still too large on these intervals,
-     *      the problem is intrinsically ill-conditioned for this
-     *      representation in working precision; throw rather than
-     *      return an inaccurate number.
+     *   5. If the indicator is still too large on these intervals, the
+     *      series cancels too strongly for working precision; evaluate the
+     *      same series in p-bit arithmetic, p = 128, 256, ..., until its
+     *      indicator is below the threshold (set_extended_precision).
      */
     ScaledReal evaluate_scaled(const std::vector<Real>& nodes, int* n_out = nullptr) {
         if (nodes.empty()) {
@@ -412,7 +339,7 @@ public:
         }
         const int q = static_cast<int>(nodes.size()) - 1;
         validate_nodes_(nodes);
-        last_squarings_ = 0;
+        last_precision_bits_ = std::numeric_limits<Real>::digits;
 
         Real node_min = nodes[0], node_max = nodes[0];
         for (int i = 1; i <= q; ++i) {
@@ -436,12 +363,6 @@ public:
                 throw_conditioning_(last_error_estimate_);
             }
             return ex / fq;
-        }
-
-        // Width-dominated sets for which the series would cost far more
-        // than scaling and squaring (huge c, modest q): squaring directly.
-        if (squaring_fallback_ && prefer_squaring_(q, node_max / 2 - node_min / 2)) {
-            return evaluate_by_squaring_(nodes, n_out);
         }
 
         // Pre-screen: if [a, b] is more than 100x wider than the node
@@ -551,55 +472,35 @@ public:
 
     /**
      * @brief Last resort of evaluate()/evaluate_scaled() (default true):
-     *        when the series is too ill-conditioned on every interval
-     *        tried, evaluate by scaling and squaring.  The nodes are
-     *        halved s times until the half-width is at most 1, the
-     *        divided differences of all node segments are computed there
-     *        by the Chebyshev--Bessel recurrence (well conditioned at
-     *        this width), and the identity
-     *          exp[2w_i..2w_j] = 2^{i-j} sum_k exp[w_i..w_k] exp[w_k..w_j]
-     *        is applied s times.  All divided differences of exp are
-     *        positive, so the squaring adds only positive terms and
-     *        cannot cancel.  Cost O(q^3 (s + 1)); used only where the
-     *        series alone would refuse.  Its error estimate,
-     *        2^s (eps_0 + (q+3) u) plus the prefactor's, is still checked
-     *        against the threshold.
+     *        when the indicator exceeds the threshold on every interval
+     *        tried in working precision, the same Chebyshev--Bessel series
+     *        is evaluated in binary floating point of p bits (MPFR), for
+     *        p = 128, 256, 512, ..., on the tight interval and on the
+     *        lowered interval, until its indicator kappa * 2^{1-p} * N
+     *        (plus the prefactor's rounding) is below the threshold.  The
+     *        cancellation of the series is unchanged; only the number of
+     *        digits available to absorb it grows.
      */
-    void set_squaring_fallback(bool v) { squaring_fallback_ = v; }
-    /// Number of squarings used by the most recent evaluation (0: series).
-    int last_squarings() const { return last_squarings_; }
-    /// Arithmetic of the most recent squaring evaluation: 1 = working
-    /// precision, 2 = double-double (0: no squaring).
-    int last_squaring_precision() const { return last_squarings_ ? last_squaring_precision_ : 0; }
+    void set_extended_precision(bool v) { extended_precision_ = v; }
+    /// Significand bits used by the most recent evaluation:
+    /// std::numeric_limits<Real>::digits for the working-precision series,
+    /// p for the extended-precision series.
+    int last_precision_bits() const { return last_precision_bits_; }
 
     /**
-     * @brief Test/calibration hook: exp[x] by scaling and squaring only,
-     *        in working precision (precision = 1) or double-double
-     *        (precision = 2, Real = double), without the threshold check.
-     *        last_error_estimate() and last_squarings() are set.
+     * @brief Test hook: the series on [lo, hi] (nodes in [lo, hi]) in p-bit
+     *        arithmetic, without the threshold check.  Sets
+     *        last_error_estimate() and last_precision_bits().
      */
-    ScaledReal evaluate_squaring_scaled(const std::vector<Real>& nodes, int precision = 1) {
+    ScaledReal evaluate_extended_scaled(const std::vector<Real>& nodes, Real lo, Real hi,
+                                        int bits, int* n_out = nullptr) {
         if (nodes.empty()) throw std::invalid_argument("Node vector cannot be empty");
         validate_nodes_(nodes);
-        Real lo = nodes[0], hi = nodes[0];
-        for (const Real& v : nodes) { lo = std::min(lo, v); hi = std::max(hi, v); }
-        if (lo == hi) throw std::invalid_argument("evaluate_squaring_scaled: nodes must not all be equal");
-        int s = 0;
-        ScaledReal r;
-        if (precision == 2) {
-            if constexpr (std::is_same<Real, double>::value) {
-                r = squaring_core_<detail::DD>(nodes, &s, nullptr);
-            } else {
-                throw std::invalid_argument("double-double squaring needs Real = double");
-            }
-        } else {
-            r = squaring_core_<Real>(nodes, &s, nullptr);
-        }
-        last_squarings_ = s;
-        last_squaring_precision_ = precision == 2 ? 2 : 1;
+        long double est = 0.0L;
+        const ScaledReal r = extended_core_(nodes, lo, hi, bits, &est, n_out);
+        last_error_estimate_ = est;
         last_kappa_eps_ = 0.0L;
-        last_error_estimate_ = squaring_estimate_(s, hi / 2 - lo / 2,
-                                                  static_cast<int>(nodes.size()) - 1, precision == 2);
+        last_precision_bits_ = bits;
         return r;
     }
     StoppingRule stopping_rule() const { return stopping_; }
@@ -682,16 +583,16 @@ public:
             const ScaledReal Sd = evaluate_normalized_scaled(nodes_den);
             last_kappa_eps_ = k1 + last_kappa_eps_;
             last_error_estimate_ = e1 + last_error_estimate_;
-            last_squarings_ = 0;
+            last_precision_bits_ = std::numeric_limits<Real>::digits;
             if (last_error_estimate_ > max_error_estimate_) {
                 throw_conditioning_(last_error_estimate_);
             }
             return Sn / Sd;
         } catch (const std::runtime_error&) {
-            if (!squaring_fallback_) throw;
+            if (!extended_precision_) throw;
         }
         // Common-interval ratio refused: evaluate both values in full
-        // (retries, then scaling and squaring) and divide.  Each value
+        // (retries, then extended precision) and divide.  Each value
         // gets half of the error budget, so that the ratio's indicator
         // (the sum of both) stays below the threshold.
         const long double budget = max_error_estimate_;
@@ -702,10 +603,10 @@ public:
         max_error_estimate_ = budget / 2;
         const ScaledReal Vn = evaluate_scaled(nodes_num);
         const long double e1 = last_error_estimate_;
-        const int s1 = last_squarings_;
+        const int p1 = last_precision_bits_;
         const ScaledReal Vd = evaluate_scaled(nodes_den);
         last_error_estimate_ = e1 + last_error_estimate_;
-        last_squarings_ = std::max(s1, last_squarings_);
+        last_precision_bits_ = std::max(p1, last_precision_bits_);
         max_error_estimate_ = budget;
         if (last_error_estimate_ > max_error_estimate_) {
             throw_conditioning_(last_error_estimate_);
@@ -729,9 +630,8 @@ private:
     long double last_error_estimate_ = 0.0L;
     long double max_error_estimate_ = 1e-10L;
     bool lowered_retry_ = true;
-    bool squaring_fallback_ = true;
-    int last_squarings_ = 0;
-    int last_squaring_precision_ = 1;
+    bool extended_precision_ = true;
+    int last_precision_bits_ = std::numeric_limits<Real>::digits;
 
     void validate_nodes_(const std::vector<Real>& nodes) const {
         for (const Real& x : nodes) {
@@ -752,8 +652,8 @@ private:
             " on the tightest available interval.  The Chebyshev--Bessel "
             "series cancels too strongly for these nodes in the current "
             "precision (typically large q and c with q < c, or nodes "
-            "concentrated far below their maximum); use higher precision "
-            "or the MNP method.");
+            "concentrated far below their maximum).  Enable "
+            "set_extended_precision(true) to evaluate the series in higher precision.");
     }
 
     /// One evaluation on [lo, hi], no retries: throws if the indicator
@@ -799,294 +699,228 @@ private:
                 return evaluate_once_on_(nodes, node_min - Real(s) * w, node_max, n_out);
             } catch (const std::runtime_error&) {
                 if (s + 1 == tries) {
-                    if (squaring_fallback_) return evaluate_by_squaring_(nodes, n_out);
+                    if (extended_precision_) return evaluate_extended_(nodes, node_min, node_max, n_out);
                     throw;
                 }
             }
         }
         // no interval left to try (first >= tries)
-        if (squaring_fallback_) return evaluate_by_squaring_(nodes, n_out);
+        if (extended_precision_) return evaluate_extended_(nodes, node_min, node_max, n_out);
         throw_conditioning_(last_error_estimate_);
     }
 
-    // ---- Scaling and squaring (last resort; see set_squaring_fallback) --
-    //
-    // The routine is written once, for an arithmetic type F: F = Real
-    // (working precision) or F = detail::DD (double-double, used when the
-    // working-precision indicator exceeds the threshold; Real = double
-    // only).  Entries are F mantissas with a separate binary exponent.
-    template <typename F> struct SqEntryT { F m; long e; };
+    // ---- Extended precision (last resort; see set_extended_precision) ----
 
-    template <typename T> static double sq_hi_(T v) { return static_cast<double>(v); }
-    static double sq_hi_(const detail::DD& v) { return v.hi; }
-    template <typename T> static void sq_scale_(T& v, int k) { v = std::ldexp(v, k); }
-    static void sq_scale_(detail::DD& v, int k) { v.hi = std::ldexp(v.hi, k); v.lo = std::ldexp(v.lo, k); }
-    template <typename T> static T sq_mulp2_(T v, double p) { return v * static_cast<T>(p); }
-    static detail::DD sq_mulp2_(const detail::DD& v, double p) { return detail::DD(v.hi * p, v.lo * p); }
-
-    template <typename F>
-    static SqEntryT<F> sq_make_(F m, long e) {
-        const double h = sq_hi_(m);
-        if (h == 0.0) return {F(0.0), 0};
-        int ex;
-        (void) std::frexp(h, &ex);
-        sq_scale_(m, -ex);
-        return {m, e + ex};
-    }
-    /// 2^{-k}, k >= 0 (0 beyond the subnormal range).
-    static double sq_pow2m_(long k) {
-        static const std::vector<double> tbl = [] {
-            std::vector<double> t(1200);
-            for (int i = 0; i < 1200; ++i) t[i] = std::ldexp(1.0, -i);
-            return t;
-        }();
-        return k < 1200 ? tbl[static_cast<size_t>(k)] : 0.0;
-    }
-
-    /// e^x for |x| <= 1 in F (Taylor series; F = double uses std::exp).
-    template <typename T> static T sq_exp_small_(T x) { return std::exp(x); }
-    static detail::DD sq_exp_small_(const detail::DD& x) {
-        detail::DD term(1.0), sum(1.0);
-        for (int k = 1; k < 40; ++k) {
-            term = detail::dd_div_d(detail::dd_mul(term, x), static_cast<double>(k));
-            sum = detail::dd_add(sum, term);
-            if (std::abs(term.hi) < 1e-34 * std::abs(sum.hi)) break;
+    /// A vector of MPFR numbers of one precision (RAII).
+    struct MpVec {
+        std::vector<__mpfr_struct> a;
+        MpVec(std::size_t n, mpfr_prec_t p) : a(n) {
+            for (auto& v : a) { mpfr_init2(&v, p); mpfr_set_zero(&v, 1); }
         }
-        return sum;
+        ~MpVec() { for (auto& v : a) mpfr_clear(&v); }
+        MpVec(const MpVec&) = delete;
+        MpVec& operator=(const MpVec&) = delete;
+        mpfr_ptr operator[](std::size_t i) { return &a[i]; }
+        std::size_t size() const { return a.size(); }
+    };
+
+    /// log2 |v| for a nonzero MPFR number (exact exponent, rounded mantissa).
+    static long double log2_abs_(mpfr_srcptr v) {
+        long e;
+        const double m = mpfr_get_d_2exp(&e, v, MPFR_RNDN);
+        return std::log2(std::abs(static_cast<long double>(m))) + e;
     }
-    /// I_0(c) for 0 < c <= 1 in F: sum_k ((c/2)^2)^k / (k!)^2.
-    template <typename F>
-    static F sq_I0_small_(double c) {
-        const F t = F(c / 2) * F(c / 2);
-        F term(1.0), sum(1.0);
-        for (int k = 1; k < 40; ++k) {
-            term = (term * t) / F(static_cast<double>(k) * k);
-            sum = sum + term;
+
+    /// rho_k = I_k(c)/I_{k-1}(c), k = 1..K-1, by the backward recurrence
+    /// rho_k = 1 / (2k/c + rho_{k+1}) from rho_K = 0, in p bits.  Each
+    /// step contracts the starting error by rho_k^2 <= (c/(2k))^2, so
+    /// p/3 + 64 steps beyond max(2c, kmax) make it negligible against
+    /// 2^-p.
+    static void extended_rho_(MpVec& rho, double c, mpfr_prec_t p) {
+        const long K = static_cast<long>(rho.size()) - 1;
+        mpfr_t t;
+        mpfr_init2(t, p);
+        mpfr_set_zero(rho[K], 1);
+        for (long k = K - 1; k >= 1; --k) {
+            mpfr_set_si(t, 2 * k, MPFR_RNDN);
+            mpfr_div_d(t, t, c, MPFR_RNDN);
+            mpfr_add(t, t, rho[k + 1], MPFR_RNDN);
+            mpfr_ui_div(rho[k], 1, t, MPFR_RNDN);
         }
-        return sum;
+        mpfr_clear(t);
     }
 
     /**
-     * Scaling and squaring in arithmetic F.  Returns exp[x] as a
-     * ScaledReal; *s_out = number of squarings, *n_out = depth used.
-     * Error model (validated against exact values, manuscript Sec. 4.4):
-     * a relative error of the half-width table is doubled by each
-     * squaring, so the result carries ~2^s u_F; in working precision the
-     * shift x - d (rounded) adds up to u c.
+     * The Chebyshev--Bessel series on [lo, hi] in p-bit arithmetic:
+     * Algorithm 1 with the same certified stopping rule, nodes in
+     * nonincreasing order, and kappa accumulated alongside.  The exponent
+     * range of MPFR makes column scaling unnecessary.  The prefactor is
+     * formed in p bits as well, from I_0(c) = e^c / (1 + 2 sum_n R_n(c))
+     * (the expansion at y = 1; all terms positive):
+     *     e^d I_0(c) / c^q = e^{d+c} / ((1 + 2 sum_n R_n) c^q).
+     * *est = kappa 2^{1-p} N_eff + 2^{1-p} (|d| + c + q + 8)
+     *        + rounding of the result to Real.
      */
-    template <typename F>
-    ScaledReal squaring_core_(const std::vector<Real>& nodes_in, int* s_out, int* n_out) {
-        constexpr bool dd = std::is_same<F, detail::DD>::value;
-        std::vector<Real> x(nodes_in);
-        std::sort(x.begin(), x.end(), std::greater<Real>());
-        const int q = static_cast<int>(x.size()) - 1;
-        const Real hi = x[0], lo = x[q];
-        const Real d = hi / 2 + lo / 2;
-        const Real c = detail::fit_halfwidth(lo, hi, d, hi / 2 - lo / 2);
-        int s = 0;
-        while (std::ldexp(c, -s) > Real(1)) ++s;
-        const double cp = std::ldexp(static_cast<double>(c), -s);   // half-width after halving
-        // Shifted nodes t = x - d (exact as a DD pair; rounded otherwise),
-        // halved nodes w = t 2^-s and y = w / cp in [-1, 1].
-        std::vector<F> w(q + 1), y(q + 1);
-        for (int i = 0; i <= q; ++i) {
-            F t;
-            if constexpr (dd) t = detail::two_sum(static_cast<double>(x[i]), -static_cast<double>(d));
-            else t = F(x[i] - d);
-            F wi = t; sq_scale_(wi, -s);
-            w[i] = wi;
-            F yi = wi / F(cp);
-            if (sq_hi_(yi) > 1.0) yi = F(1.0);
-            if (sq_hi_(yi) < -1.0) yi = F(-1.0);
-            y[i] = yi;
-        }
-        const auto idx = [q](int i, int j) { return static_cast<size_t>(i) * (q + 1) + j; };
-        std::vector<SqEntryT<F>> T(static_cast<size_t>(q + 1) * (q + 1), SqEntryT<F>{F(0.0), 0});
-
-        // rho_k = I_k(cp)/I_{k-1}(cp) (backward recurrence, in F) and
-        // L[n] = sum_{l<=n} log rho_l (long double, for the tail bound).
-        std::vector<F> rho;
-        std::vector<long double> L;
-        const auto make_rho = [&](int K) {
-            rho.assign(K + 2, F(0.0));
-            F r(0.0);
-            for (int k = K + 80; k >= 1; --k) {
-                r = F(1.0) / (F(2.0 * k) / F(cp) + r);
-                if (k <= K + 1) rho[k] = r;
-            }
-            L.assign(K + 2, 0.0L);
-            for (int k = 1; k <= K + 1; ++k)
-                L[k] = L[k - 1] + std::log(static_cast<long double>(sq_hi_(rho[k])));
-        };
-        int extra = 40, nmax_used = 0;
-        make_rho(q + extra + 2);
-        // P_k = I_0(cp) (2/cp)^k R_k: exp[w_i..w_{i+k}] = P_k sum_n W_k^(n).
-        std::vector<SqEntryT<F>> P(q + 1);
-        const auto make_P = [&]() {
-            P[0] = sq_make_(sq_I0_small_<F>(cp), 0);
-            for (int k = 1; k <= q; ++k)
-                P[k] = sq_make_(P[k - 1].m * ((F(2.0) / F(cp)) * rho[k]), P[k - 1].e);
-        };
-        make_P();
-
-        std::vector<F> Wm1, W0, W1, sum;
-        for (int i = 0; i <= q; ++i) {
-            const int len = q - i;
-            T[idx(i, i)] = sq_make_(sq_exp_small_(w[i]), 0);
-            if (len == 0) continue;
-            for (;;) {
-                const int N = len + extra;
-                if (N + 2 >= static_cast<int>(rho.size())) { make_rho(2 * N + 8); make_P(); }
-                Wm1.assign(len + 1, F(0.0)); W0.assign(len + 1, F(0.0));
-                W1.assign(len + 1, F(0.0)); sum.assign(len + 1, F(0.0));
-                // weighted columns W_k^(n) = R_n D_k^(n) / sigma_k, sigma_0 = 1/2,
-                // sigma_k = R_k 2^{k-1}; layer 0: W_0 = 2; layer 1: W_0 = 2 R_1 y, W_1 = 1
-                Wm1[0] = F(2.0);
-                W0[0] = F(2.0) * rho[1] * y[i];
-                W0[1] = F(1.0);
-                sum[1] = F(1.0);
-                for (int n = 1; n < N; ++n) {
-                    const F rn1 = rho[n + 1], rr = rho[n + 1] * rho[n];
-                    const int kmax = std::min(n + 1, len);
-                    for (int k = 0; k <= kmax; ++k) {
-                        F v = F(2.0) * rn1 * y[i + k] * W0[k] - rr * Wm1[k];
-                        if (k >= 1) v = v + (rn1 / rho[k]) * W0[k - 1];
-                        W1[k] = v;
-                        if (k >= 1) sum[k] = sum[k] + v;
-                    }
-                    std::swap(Wm1, W0); std::swap(W0, W1);
-                }
-                // Certified tail check per order k (in W units):
-                // sum_{n>N} R_n B(n,k) / sigma_k <= (tol_F/4) |sum_k|.
-                const long double tolF = dd ? 1e-31L : static_cast<long double>(tolerance_);
-                bool ok = true;
-                for (int k = 1; k <= len && ok; ++k) {
-                    const int n = N + 1;
-                    const long double lt = (L[n] - L[k]) - (k - 1) * std::log(2.0L) + detail::log_B(n, k);
-                    const long double r = detail::tail_ratio_bound(
-                        n, k, static_cast<long double>(sq_hi_(rho[n + 1])));
-                    if (!(r < 1.0L)) { ok = false; break; }
-                    const long double lim = std::log(tolF / 4.0L)
-                        + std::log(std::abs(static_cast<long double>(sq_hi_(sum[k]))));
-                    if (lt - std::log1p(-r) > lim) ok = false;
-                }
-                nmax_used = std::max(nmax_used, N);
-                if (ok) break;
-                extra *= 2;
-            }
-            for (int k = 1; k <= len; ++k) {
-                const SqEntryT<F> v = sq_make_(sum[k], 0);
-                T[idx(i, i + k)] = sq_make_(P[k].m * v.m, P[k].e + v.e);
-            }
-        }
-
-        // s squarings: exp[2w_i..2w_j] = 2^{i-j} sum_{k=i}^{j} exp[w_i..w_k] exp[w_k..w_j];
-        // all terms are positive.  Terms are aligned to the largest exponent.
-        std::vector<SqEntryT<F>> U(T.size());
-        for (int t = 0; t < s; ++t) {
-            for (int i = 0; i <= q; ++i) {
-                for (int j = i; j <= q; ++j) {
-                    long emax = std::numeric_limits<long>::min();
-                    for (int k = i; k <= j; ++k) {
-                        const SqEntryT<F>& a = T[idx(i, k)];
-                        const SqEntryT<F>& b = T[idx(k, j)];
-                        if (sq_hi_(a.m) != 0.0 && sq_hi_(b.m) != 0.0) emax = std::max(emax, a.e + b.e);
-                    }
-                    F acc(0.0);
-                    if (emax != std::numeric_limits<long>::min()) {
-                        for (int k = i; k <= j; ++k) {
-                            const SqEntryT<F>& a = T[idx(i, k)];
-                            const SqEntryT<F>& b = T[idx(k, j)];
-                            const long sh = emax - (a.e + b.e);
-                            if (sh < 1100) {
-                                acc = acc + sq_mulp2_(a.m * b.m, sq_pow2m_(sh));
-                            }
-                        }
-                    }
-                    U[idx(i, j)] = sq_make_(acc, emax + (i - j));
-                }
-            }
-            std::swap(T, U);
-        }
-
-        // multiply by e^d
-        ScaledReal r;
-        const SqEntryT<F>& top = T[idx(0, q)];
-        if constexpr (dd) {
-            long k;
-            const detail::DD ed = detail::dd_exp_split(static_cast<double>(d), &k);
-            const SqEntryT<F> v = sq_make_(top.m * ed, top.e + k);
-            r.mantissa = static_cast<Real>(v.m.hi + v.m.lo);
-            r.exponent = v.e;
-        } else {
-            long double err_d = 0.0L;
-            const ScaledReal ed = exp_scaled_(d, &err_d);
-            ScaledReal t;
-            t.mantissa = static_cast<Real>(top.m);
-            t.exponent = top.e;
-            r = t * ed;
-        }
-        r.normalize();
-        *s_out = s;
-        if (n_out) *n_out = nmax_used;
-        return r;
-    }
-
-    /// Indicator of the squaring path: 2^s u_F (8 + q/4) -- the base
-    /// table's rounding grows with the order, and every error is doubled
-    /// by each squaring -- plus, in working precision, the rounding of the
-    /// shift x - d (u c) and, in double-double, the final rounding to
-    /// Real (2u).  Calibrated against exact values (manuscript App. D).
-    long double squaring_estimate_(int s, Real c, int q, bool dd) const {
-        const long double u = static_cast<long double>(std::numeric_limits<Real>::epsilon());
-        const long double C = 8.0L + 0.25L * q;
-        if (dd) {
-            const long double udd = 0x1p-104L;
-            return std::ldexp(udd * C, s) + 2.0L * u;
-        }
-        return std::ldexp(u * C, s) + u * (std::abs(static_cast<long double>(c)) + 8.0L);
-    }
-
-    /// True when q < c and the series is estimated to cost more than 10
-    /// times the squaring path.  Series: up to four intervals, each with
-    /// Bessel ratios by a backward recurrence of ~2c steps (one division
-    /// each, weight 10) and O(qN) recurrence work; squaring: O((s+1) q^3)
-    /// multiply-adds, x8 in double-double (needed for c >~ 3e4).
-    bool prefer_squaring_(int q, Real c) const {
-        const double cd = static_cast<double>(c);
-        if (!(cd > q)) return false;
-        const double N = std::sqrt(2.0 * cd * 37.0) + q;
-        const double series = 4.0 * (20.0 * cd + 2.0 * q * N);
-        int s = 0;
-        while (std::ldexp(cd, -s) > 1.0) ++s;
-        const double qq = q + 1.0;
-        const double squaring = (s + 1.0) * qq * qq * qq / 3.0 * (cd > 3e4 ? 8.0 : 1.0) + 100.0 * qq;
-        return series > 10.0 * squaring;
-    }
-
-    ScaledReal evaluate_by_squaring_(const std::vector<Real>& nodes, int* n_out) {
-        int s = 0;
-        Real lo = nodes[0], hi = nodes[0];
-        for (const Real& v : nodes) { lo = std::min(lo, v); hi = std::max(hi, v); }
-        const Real c = hi / 2 - lo / 2;
-        ScaledReal r = squaring_core_<Real>(nodes, &s, n_out);
-        last_squarings_ = s;
-        last_kappa_eps_ = 0.0L;
+    ScaledReal extended_core_(const std::vector<Real>& nodes, Real lo, Real hi,
+                              int bits, long double* est, int* n_out) {
+        ExpDivDiff<Real> E(lo, hi, tolerance_, max_iterations_);
         const int q = static_cast<int>(nodes.size()) - 1;
-        last_error_estimate_ = squaring_estimate_(s, c, q, false);
-        last_squaring_precision_ = 1;
-        if (last_error_estimate_ > max_error_estimate_) {
-            if constexpr (std::is_same<Real, double>::value) {
-                r = squaring_core_<detail::DD>(nodes, &s, n_out);
-                last_error_estimate_ = squaring_estimate_(s, c, q, true);
-                last_squaring_precision_ = 2;
+        const double c = static_cast<double>(E.c_), d = static_cast<double>(E.d_);
+        const mpfr_prec_t p = bits;
+        const long double up = std::ldexp(1.0L, 1 - bits);
+        const long double tol = static_cast<long double>(tolerance_);
+
+        std::vector<double> xs(nodes.begin(), nodes.end());
+        std::sort(xs.begin(), xs.end(), std::greater<double>());
+        MpVec y(q + 1, p);
+        for (int i = 0; i <= q; ++i) {
+            mpfr_set_d(y[i], xs[i], MPFR_RNDN);       // exact
+            mpfr_sub_d(y[i], y[i], d, MPFR_RNDN);
+            mpfr_div_d(y[i], y[i], c, MPFR_RNDN);
+        }
+
+        long K = static_cast<long>(std::ceil(2.0 * c)) + 2L * q + bits / 3 + 128;
+        auto rho = std::make_unique<MpVec>(K + 1, p);
+        extended_rho_(*rho, c, p);
+        const long margin = bits / 3 + 64;
+
+        MpVec M2(q + 1, p), M1(q + 1, p), Mc(q + 1, p);
+        mpfr_set_ui(M2[0], 1, MPFR_RNDN);
+        mpfr_set(M1[0], y[0], MPFR_RNDN);
+        if (q >= 1) mpfr_set_ui(M1[1], 1, MPFR_RNDN);
+        MpVec w(5, p);                         // R, S, A, t, v
+        mpfr_ptr R = w[0], S = w[1], A = w[2], t = w[3], v = w[4];
+        mpfr_set(S, M2[q], MPFR_RNDN);
+        mpfr_abs(A, S, MPFR_RNDN);
+        mpfr_set(R, (*rho)[1], MPFR_RNDN);
+        mpfr_mul(t, R, M1[q], MPFR_RNDN);
+        mpfr_mul_2ui(t, t, 1, MPFR_RNDN);
+        mpfr_add(S, S, t, MPFR_RNDN);
+        mpfr_abs(t, t, MPFR_RNDN);
+        mpfr_add(A, A, t, MPFR_RNDN);
+
+        const int n_cert0 = std::max(q, 2);
+        int n_eff = 1, n;
+        bool converged = false;
+        for (n = 2; n < max_iterations_; ++n) {
+            if (n + 2 > K - margin) {           // extend the ratios
+                K *= 2;
+                rho = std::make_unique<MpVec>(K + 1, p);
+                extended_rho_(*rho, c, p);
+            }
+            mpfr_mul(R, R, (*rho)[n], MPFR_RNDN);
+            const int kmax = std::min(n, q);
+            for (int k = 0; k <= kmax; ++k) {
+                mpfr_mul(v, y[k], M1[k], MPFR_RNDN);
+                if (k > 0) mpfr_add(v, v, M1[k - 1], MPFR_RNDN);
+                mpfr_mul_2ui(v, v, 1, MPFR_RNDN);
+                mpfr_sub(Mc[k], v, M2[k], MPFR_RNDN);
+            }
+            mpfr_mul(t, R, Mc[q], MPFR_RNDN);
+            mpfr_mul_2ui(t, t, 1, MPFR_RNDN);
+            mpfr_add(S, S, t, MPFR_RNDN);
+            const bool tz = mpfr_zero_p(t);
+            mpfr_abs(t, t, MPFR_RNDN);
+            mpfr_add(A, A, t, MPFR_RNDN);
+
+            if (!mpfr_zero_p(S)) {
+                const long double lS = log2_abs_(S);
+                const long double lt = tz ? -1e30L : log2_abs_(t);
+                if (lt >= lS + std::log2(up)) n_eff = n;
+                if (n >= n_cert0 && lt < lS + std::log2(tol)) {
+                    // tail <= 2 R_{n+1} B(n+1,q) / (1 - r), in log2
+                    const long double rho2 = static_cast<long double>(mpfr_get_d((*rho)[n + 2], MPFR_RNDU));
+                    const long double r = detail::tail_ratio_bound(n + 1, q, rho2);
+                    if (r < 1.0L) {
+                        const long double lR1 = log2_abs_(R) + log2_abs_((*rho)[n + 1]);
+                        const long double lB = detail::log_B(n + 1, q) / kLn2;
+                        const long double ltail = 1.0L + lR1 + lB - std::log2(1.0L - r);
+                        if (ltail <= lS + std::log2(tol / 4.0L)) { converged = true; break; }
+                    }
+                }
+            }
+            for (int k = 0; k <= kmax; ++k) { mpfr_swap(M2[k], M1[k]); mpfr_swap(M1[k], Mc[k]); }
+        }
+        if (n_out) *n_out = n;
+        if (!converged) {
+            throw std::runtime_error("ExpDivDiff (extended precision): stopping rule not "
+                                     "satisfied within max_iterations_");
+        }
+        const long double uR = static_cast<long double>(std::numeric_limits<Real>::epsilon());
+        if (mpfr_zero_p(S)) {
+            *est = std::numeric_limits<long double>::infinity();
+        } else {
+            const long double lkappa = log2_abs_(A) - log2_abs_(S);
+            *est = std::exp2(std::min(lkappa + std::log2(up * n_eff), 1e4L)) +
+                   up * (std::abs(static_cast<long double>(d)) + c + q + 8.0L) + 2.0L * uR;
+        }
+        // Z = 1 + 2 sum_{n>=1} R_n(c), summed until R_n < 2^{-p-8} Z.
+        for (;;) {
+            mpfr_set_ui(t, 1, MPFR_RNDN);               // running R_n
+            mpfr_set_ui(v, 1, MPFR_RNDN);               // Z
+            long m = 1;
+            bool done = false;
+            for (; m <= K - margin; ++m) {
+                mpfr_mul(t, t, (*rho)[m], MPFR_RNDN);
+                mpfr_mul_2ui(R, t, 1, MPFR_RNDN);
+                mpfr_add(v, v, R, MPFR_RNDN);
+                if (mpfr_zero_p(t) || log2_abs_(t) < log2_abs_(v) - bits - 8) { done = true; break; }
+            }
+            if (done) break;
+            K *= 2;
+            rho = std::make_unique<MpVec>(K + 1, p);
+            extended_rho_(*rho, c, p);
+        }
+        // value = S e^{d+c} / (Z c^q)
+        mpfr_set_d(t, d, MPFR_RNDN);
+        mpfr_add_d(t, t, c, MPFR_RNDN);
+        mpfr_exp(t, t, MPFR_RNDN);
+        mpfr_mul(S, S, t, MPFR_RNDN);
+        mpfr_div(S, S, v, MPFR_RNDN);
+        mpfr_set_d(t, c, MPFR_RNDN);
+        mpfr_pow_ui(t, t, static_cast<unsigned long>(q), MPFR_RNDN);
+        mpfr_div(S, S, t, MPFR_RNDN);
+        ScaledReal Ss;
+        long ex;
+        Ss.mantissa = static_cast<Real>(mpfr_get_d_2exp(&ex, S, MPFR_RNDN));
+        Ss.exponent = ex;
+        Ss.normalize();
+        return Ss;
+    }
+
+    /// Last resort: the series in p = 128, 256, ... bits, on the tight
+    /// interval and (if lowered_retry) on [min x - w, max x], until the
+    /// indicator of one of them is below the threshold.
+    ScaledReal evaluate_extended_(const std::vector<Real>& nodes, Real node_min,
+                                  Real node_max, int* n_out) {
+        const Real w = node_max - node_min;
+        const int ntry = lowered_retry_ ? 2 : 1;
+        long double best = std::numeric_limits<long double>::infinity();
+        for (int bits = 128; bits <= kMaxExtendedBits; bits *= 2) {
+            for (int s = 0; s < ntry; ++s) {
+                long double est = 0.0L;
+                int nu = 0;
+                ScaledReal r;
+                try {
+                    r = extended_core_(nodes, node_min - Real(s) * w, node_max, bits, &est, &nu);
+                } catch (const std::runtime_error&) {
+                    continue;
+                }
+                best = std::min(best, est);
+                if (est <= max_error_estimate_ && r.mantissa > Real(0)) {
+                    if (n_out) *n_out = nu;
+                    last_kappa_eps_ = 0.0L;
+                    last_error_estimate_ = est;
+                    last_precision_bits_ = bits;
+                    return r;
+                }
             }
         }
-        if (!(r.mantissa > Real(0)) || last_error_estimate_ > max_error_estimate_) {
-            throw_conditioning_(last_error_estimate_);
-        }
-        return r;
+        last_error_estimate_ = best;
+        throw_conditioning_(best);
     }
+
+    static constexpr int kMaxExtendedBits = 1 << 16;
 
     /// sign * exp(log_v) as a ScaledReal.
     static ScaledReal from_log_(long double log_v, Real sign) {

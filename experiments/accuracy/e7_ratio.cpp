@@ -11,15 +11,15 @@
 // Output (argv[1] = output prefix):
 //   PREFIX_nodes.csv    instance,nodes      (instance 2k: x, 2k+1: x')
 //                       for mp_reference.py
-//   PREFIX_results.csv  pair,q,c,trial,cheb,cheb_est,cheb_refused,cheb_sq,mnp
+//   PREFIX_results.csv  pair,q,c,trial,cheb,cheb_est,cheb_refused,cheb_ext,mnp
 //     cheb       ratio from evaluate_ratio_scaled with the default settings
 //                (threshold 1e-10; if the common-interval ratio is
 //                refused, both values are evaluated in full, with the
-//                retries and, if needed, scaling and squaring)
+//                retries and, if needed, extended precision)
 //     cheb_log   natural log of the ratio (finite even if cheb overflows)
 //     cheb_est   the indicator of the ratio (sum of both)
 //     cheb_refused 1 if evaluate_ratio threw (no value)
-//     cheb_sq    squarings used (0: common-interval series)
+//     cheb_ext   bits of the extended-precision series (0: double)
 //     mnp        MNP ratio; nan if either evaluation failed or was not
 //                finite and positive
 //
@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
     FILE* fn = std::fopen((pre + "_nodes.csv").c_str(), "w");
     FILE* fr = std::fopen((pre + "_results.csv").c_str(), "w");
     std::fprintf(fn, "instance,nodes\n");
-    std::fprintf(fr, "pair,q,c,trial,cheb,cheb_log,cheb_est,cheb_refused,cheb_sq,mnp\n");
+    std::fprintf(fr, "pair,q,c,trial,cheb,cheb_log,cheb_mant,cheb_exp,cheb_est,cheb_refused,cheb_ext,mnp\n");
     const std::vector<int> qs = {1, 2, 5, 10, 20, 50, 100, 200, 500};
     const std::vector<double> cs = {0.1, 0.3, 1, 3, 10, 30, 100, 300, 1000};
     std::mt19937_64 rng(20261119);
@@ -60,14 +60,15 @@ int main(int argc, char** argv) {
                     std::fprintf(fn, "%s%.17g", i ? " " : "", y[i]);
                 std::fprintf(fn, "\n");
             }
-            double cheb = NAN; long double est = NAN, lg = NAN;
+            double cheb = NAN, mant = NAN; long ex = 0; long double est = NAN, lg = NAN;
             int refused = 1, sq = 0;
             try {
                 const auto r = e.evaluate_ratio_scaled(x, xp);
                 cheb = r.to_real();
                 lg = r.log_abs();
+                mant = r.mantissa; ex = r.exponent;
                 est = e.last_error_estimate();
-                sq = e.last_squarings();
+                sq = (e.last_precision_bits() > 53 ? e.last_precision_bits() : 0);
                 refused = 0;
             } catch (...) {}
             double mnp = NAN;
@@ -76,8 +77,8 @@ int main(int argc, char** argv) {
                 const double b = mccurdy_templated::ExpDivDiff<double>::compute(xp);
                 if (std::isfinite(a) && std::isfinite(b) && a > 0 && b > 0) mnp = a / b;
             } catch (...) {}
-            std::fprintf(fr, "%d,%d,%g,%d,%.17g,%.21Lg,%.3Le,%d,%d,%.17g\n", pair, q, c, t,
-                         cheb, lg, est, refused, sq, mnp);
+            std::fprintf(fr, "%d,%d,%g,%d,%.17g,%.21Lg,%.17g,%ld,%.3Le,%d,%d,%.17g\n", pair, q, c, t,
+                         cheb, lg, mant, ex, est, refused, sq, mnp);
         }
     }
     std::fclose(fn); std::fclose(fr);

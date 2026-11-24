@@ -5,20 +5,23 @@ Reference C++17 implementation accompanying the paper
 
 It computes exp[x₀, …, x_q] by expanding e^{cy} = I₀(c)(1 + 2 Σ Rₙ(c) Tₙ(y))
 on the mapped interval and obtaining the Chebyshev divided differences
-Tₙ[y₀, …, y_k] from a three-term recurrence. Header-only; no dependencies
-beyond the C++17 standard library (Boost.Math is used for `cyl_bessel_i` on
-platforms whose standard library lacks it, e.g. Apple libc++).
+Tₙ[y₀, …, y_k] from a three-term recurrence. Header-only. Requires the
+C++17 standard library and MPFR/GMP (link with `-lmpfr -lgmp`), which the
+batch evaluator uses for its extended-precision last resort; Boost.Math is
+used for `cyl_bessel_i` on platforms whose standard library lacks it, e.g.
+Apple libc++.
 
 ## What it is good for — and what not
 
 * **Batch evaluation.** O(qN) per evaluation. On operation traces recorded
   from a permutation-matrix-representation QMC code (PMR-QMC), batch
-  evaluation was 1.7–39× faster than the incremental routine that code uses
+  evaluation was 1.6–34× faster than the incremental routine that code uses
   (`experiments/pmr_traces`).
 * **Incremental updates.** With a fixed interval, appending a node costs
   Θ(N_max − q) and removing the most recently appended node costs O(1)
   (`chebyshev_stack.hpp`). For last-in-first-out updates an append takes
-  0.2–0.6 µs, up to ~10³× less than a full recomputation (q = 800). Interior
+  0.13 µs at c = 5 (independent of q) and 0.36–0.44 µs at c = 50, up to
+  1800× less than a full recomputation (q = 800). Interior
   removals cost a rebuild of the columns above them; on the PMR-QMC traces,
   which remove interior nodes and need large nodes first, the stack was
   slower than batch evaluation.
@@ -31,13 +34,13 @@ platforms whose standard library lacks it, e.g. Apple libc++).
   s = 1, 2 (w = max x − min x), which puts the midpoint at the smallest node
   and removes the last mechanism. The code computes an error indicator κ·u·N
   and never returns a value whose indicator exceeds the threshold (1e-10).
-  Where no interval helps (q ≲ c, large c), it falls back to **scaling and
-  squaring**: the nodes are halved until the series is well conditioned and
-  squared back with exp[2w_i..2w_j] = 2^{i−j} Σ_k exp[w_i..w_k] exp[w_k..w_j],
-  whose terms are all positive and cannot cancel. Its error grows like
-  2^s·u ≈ c·u (as for MNP); when that exceeds the threshold (c beyond a few
-  10⁴) the step is repeated in double-double arithmetic. In all tests (about
-  15,000 node sets, up to c = 2²⁸) every call returned an accurate value.
+  Where no interval helps (q ≲ c, large c), the **same series is evaluated
+  in extended precision** (MPFR, p = 128, 256, … bits) until its indicator
+  κ·2^{1−p}·N is below the threshold. The condition number satisfies
+  κ ≤ e^{b−ξ} (exp[x] = e^ξ/q!), so at most about 53 + 2.9c bits are ever
+  needed; in all tests (c ≤ 10³) 128 or 256 bits sufficed and every call
+  returned an accurate value. An extended evaluation is considerably more
+  expensive than one in double precision and is used only where needed.
 * **Range.** All intermediate quantities are scaled; any order works (tested
   to q = 3000). Values outside double range are returned in mantissa/exponent
   form; ratios of same-order values on the same interval are formed directly.
@@ -57,7 +60,7 @@ auto s   = e.evaluate_scaled(nodes);                 // mantissa * 2^exponent
 double r = e.evaluate_ratio(nodes1, nodes2);         // same order, same interval
 auto rs  = e.evaluate_ratio_scaled(nodes1, nodes2);  // ratios outside double range
 long double est = e.last_error_estimate();           // error indicator
-int sq = e.last_squarings();                         // 0: series; >0: scaling and squaring
+int bits = e.last_precision_bits();                  // 53: double; >53: extended precision
 
 // Incremental: append / LIFO remove on a fixed interval.
 chebyshev::IncrementalStack<double> st(a, b, /*q_max=*/1000);
@@ -89,7 +92,7 @@ costs extra terms; raising b above the nodes costs accuracy ~ e^{b − max xᵢ}
 ## Build and test
 
 ```sh
-g++ -std=c++17 -O2 -I. -I/opt/homebrew/include main.cpp -o ci_runner   # -I for Boost on macOS
+g++ -std=c++17 -O2 -I. -I/opt/homebrew/include main.cpp -L/opt/homebrew/lib -lmpfr -lgmp -o ci_runner
 ./ci_runner          # exits non-zero if a required group fails
 ```
 

@@ -99,12 +99,12 @@ def load(data):
                 o[p + "_err"] = (relerr(r[p + "_mant"], r[p + "_exp"], R)
                                  if st == "ok" else float("nan"))
                 o[p + "_key"] = (r[p + "_mant"], r[p + "_exp"], r[p + "_N"])
-            o["prod_sq"] = int(r.get("prod_sq", 0) or 0)
+            o["prod_ext"] = int(r.get("prod_ext", 0) or 0)
             # which interval produced the returned (default) value
             if o["prod_status"] != "ok":
                 o["interval"] = "-"
-            elif o["prod_sq"] > 0:
-                o["interval"] = "squaring"
+            elif o["prod_ext"] > 0:
+                o["interval"] = "extended"
             elif o["prod_key"] == o["ab_key"]:
                 o["interval"] = "tight(prescreen)" if c > 100 * spread[i] else "[a,b]"
             elif o["prod_key"] == o["tight_key"]:
@@ -214,7 +214,7 @@ def main():
     lines.append(" & " + " & ".join(
         rf"\multicolumn{{3}}{{c}}{{$c={c:g}$}}" for c in cs) + r" \\")
     lines.append("".join(rf"\cmidrule(lr){{{2 + 3 * k}-{4 + 3 * k}}}" for k in range(len(cs))))
-    lines.append("configuration & " + " & ".join(["Cheb.", "MNP", "sq."] * len(cs)) + r" \\")
+    lines.append("configuration & " + " & ".join(["Cheb.", "MNP", "ext."] * len(cs)) + r" \\")
     lines.append(r"\midrule")
     for cfg in CONFIGS:
         cells = [CONFIG_LABEL[cfg]]
@@ -224,7 +224,7 @@ def main():
             me = [o["mnp_err"] for o in sub if o["mnp_status"] == "ok"]
             nref = sum(o["prod_status"] != "ok" for o in sub)
             assert nref == 0, f"refused cases in {cfg}, c={c}: {nref}"
-            nsq = sum(o["prod_sq"] > 0 for o in sub)
+            nsq = sum(o["prod_ext"] > 0 for o in sub)
             cells += [fmt(max(ce) if ce else None), fmt(max(me) if me else None),
                       f"{nsq}/{len(sub)}"]
         lines.append(" & ".join(cells) + r" \\")
@@ -236,7 +236,7 @@ def main():
            "% library defaults (tol 1e-14, nodes processed in nonincreasing order,\n"
            "% threshold kappa*u*N <= 1e-10); MNP = double-precision McCurdy-Ng-Parlett,\n"
            "% values >= DBL_MIN only (MNP underflows to 0 for every q = 300 case);\n"
-           "% sq. = cases evaluated by scaling and squaring / total cases (none refused).\n")
+           "% ext. = cases evaluated by extended precision / total cases (none refused).\n")
     with open(os.path.join(a.figs, "table_accuracy.tex"), "w") as f:
         f.write(hdr + "\n".join(lines) + "\n")
     print("\n" + "\n".join(lines))

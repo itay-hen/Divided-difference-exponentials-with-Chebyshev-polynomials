@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
     std::ifstream f(argv[1]);
     std::string line;
     std::getline(f, line);
-    std::printf("instance,cheb_ok,cheb_mant,cheb_exp,cheb_N,cheb_est,cheb_sq,mnp\n");
+    std::printf("instance,cheb_ok,cheb_mant,cheb_exp,cheb_N,cheb_est,cheb_ext,mnp\n");
     while (std::getline(f, line)) {
         const auto p = line.find(',');
         const int inst = std::stoi(line.substr(0, p));
@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
         try {
             chebyshev::ExpDivDiff<double> e(lo, hi, 1e-14, 100000);
             const auto r = e.evaluate_scaled(x, &N);
-            ok = 1; mant = r.mantissa; ex = r.exponent; est = e.last_error_estimate(); sq = e.last_squarings();
+            ok = 1; mant = r.mantissa; ex = r.exponent; est = e.last_error_estimate(); sq = (e.last_precision_bits() > 53 ? e.last_precision_bits() : 0);
         } catch (...) {}
         double mnp = NAN;
         try {

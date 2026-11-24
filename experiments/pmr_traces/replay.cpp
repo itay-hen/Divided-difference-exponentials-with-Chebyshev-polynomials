@@ -38,7 +38,7 @@
 //   stack0  the naive variant: one fixed interval for the whole run (the
 //           range of all nodes in the trace) and PMR's own node order.
 // batch: if the three cached intervals are refused, the library's full
-// chain (retries, then scaling and squaring) answers the read.  stack,
+// chain (retries, then extended precision) answers the read.  stack,
 // stack0: a read the stack cannot serve (refused pushes) is answered by
 // that full batch chain (counted as a fallback and timed with the stack).
 // A fresh GBH evaluation is used only if even the full chain throws (never
@@ -134,7 +134,7 @@ long double gbh_fresh(const std::vector<double>& x) {
     return gbh_log(d, static_cast<int>(x.size()) - 1);
 }
 
-// Our batch method with the full chain (retries, scaling and squaring):
+// Our batch method with the full chain (retries, then extended precision):
 // the fallback of the incremental stacks for reads they refused.
 long double batch_full(const std::vector<double>& x) {
     const auto mm = std::minmax_element(x.begin(), x.end());
@@ -143,7 +143,7 @@ long double batch_full(const std::vector<double>& x) {
     return E.evaluate_scaled(x).log_abs();
 }
 
-struct Stats { long fallbacks = 0, rebuilds = 0, pushes = 0, squarings = 0; };
+struct Stats { long fallbacks = 0, rebuilds = 0, pushes = 0, extended = 0; };
 
 // ---------------------------------------------------------------- GBH
 double replay_gbh(const Trace& T, std::vector<long double>& out) {
@@ -190,8 +190,8 @@ double replay_batch(const Trace& T, std::vector<long double>& out,
                 try { out.push_back(E->evaluate_scaled_fixed(sh).log_abs()); own.push_back(1); done = true; }
                 catch (const std::runtime_error&) {}
             }
-            if (!done) {   // full chain of the library: retries, then scaling and squaring
-                try { Batch E(lo, hi); out.push_back(E.evaluate_scaled(sh).log_abs()); own.push_back(1); ++S.squarings; done = true; }
+            if (!done) {   // full chain of the library: retries, then extended precision
+                try { Batch E(lo, hi); out.push_back(E.evaluate_scaled(sh).log_abs()); own.push_back(1); ++S.extended; done = true; }
                 catch (const std::runtime_error&) {}
             }
             if (!done) { out.push_back(gbh_fresh(sh)); own.push_back(0); ++S.fallbacks; }

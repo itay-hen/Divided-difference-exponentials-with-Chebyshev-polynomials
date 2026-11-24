@@ -49,15 +49,15 @@ with open(dst, 'w') as f:
         res = subprocess.run([binary], input=inp, capture_output=True, text=True, check=True).stdout.split("\n")
         da = ta = 0; de = te = ge = rr = 0.0
         for s, r in zip(S, res):
-            q, l0, e0, l1, e1, lg = r.split()
+            q, m0, x0, e0, m1, x1, e1, gm, gx = r.split()
             a, b = ddexp(s, 300), ddexp(s, 600)
             assert abs(a / b - 1) < mpf(10) ** -100
-            L = log(b)
-            ge = max(ge, float(abs(mpf(lg) - L)))
-            if l0 != 'nan':
-                da += 1; err = float(abs(mpf(l0) - L)); de = max(de, err)
+            rel = lambda v: float(abs(v / b - 1))
+            ge = max(ge, rel(mpf(gm) * mpf(2) ** int(gx) / factorial(int(q))))
+            if m0 != 'nan':
+                da += 1; err = rel(mpf(m0) * mpf(2) ** int(x0)); de = max(de, err)
                 if float(e0) > 0: rr = max(rr, err / float(e0))
-            if l1 != 'nan': ta += 1; te = max(te, float(abs(mpf(l1) - L)))
+            if m1 != 'nan': ta += 1; te = max(te, rel(mpf(m1) * mpf(2) ** int(x1)))
         name = fn.split('/')[-1]
         f.write(f"{name},{len(S)},{sum(len(s)-1 for s in S)/len(S):.1f},{da},{de:.2e},{rr:.3f},{ta},{te:.2e},{ge:.2e}\n")
         f.flush()
